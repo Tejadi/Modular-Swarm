@@ -1,0 +1,7 @@
+{
+    "nrf-connect.applications": [
+        "${workspaceFolder}/coap_client",
+        "${workspaceFolder}/coap_server",
+        "${workspaceFolder}/shell_module"
+    ]
+}
