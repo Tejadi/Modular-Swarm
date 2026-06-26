@@ -1,23 +1,40 @@
-# nRF-testing — Thread CoAP light control on the Seeed XIAO nRF52840
+# nRF Reconfigurable Swarm — Thread/CoAP mesh with an Olympus command center
 
-This repo contains the Nordic **OpenThread CoAP** sample pair — `coap_server` and
-`coap_client` — ported to run on the **Seeed XIAO nRF52840** (`xiao_ble`) board,
-plus the stock `blinky` and `shell_module` samples used as bring-up references.
+This repo began as the Nordic **OpenThread CoAP** sample pair (`coap_server` /
+`coap_client`) on the **Seeed XIAO nRF52840**, and now hosts a **reconfigurable,
+ad-hoc swarm** that reports into the **Olympus** command center.
 
-The two CoAP samples implement a tiny **distributed light-control demo** over a
-[Thread](https://www.threadgroup.org/) mesh network: a client node tells one or
-many server nodes to turn a "light" on/off/toggle, using
-[CoAP](https://datatracker.ietf.org/doc/html/rfc7252) (Constrained Application
-Protocol) carried over Thread's IPv6 mesh.
+Each agent is a Jetson + nRF module carrying any subset of a modular sensor stack
+(GPS, IMU, or neither). A module is the unit of identity — it can ride a vehicle
+or operate standalone. When a module comes online the command station records its
+position, its available sensors, and whether it **contributes** data to the swarm
+or only **consumes** swarm information, and shows a live view of every module. An
+overlay **autorouter** connects the modules robustly on top of OpenThread's own
+mesh routing.
+
+Everything new lives in this repo (`proto/`, `swarm_node/`, `jetson_agent/`,
+`olympus_link/`, `sim/`); Olympus is reached over its existing network interfaces,
+so a module appears in the command center with **no Olympus code change**.
 
 - **Built with:** nRF Connect SDK **v3.3.1** (Zephyr 4.3.99)
-- **Target board:** `xiao_ble` (Seeed XIAO nRF52840, non-Sense)
-- **Intended fleet:** 2× boards running `coap_server` + 1× board running `coap_client`
+- **Target board:** `xiao_ble` (Seeed XIAO nRF52840) or `nrf52840dk`
+- **Two layers:** the swarm overlay (first half of this README) is built on the
+  original **CoAP light demo** (second half), which still documents the Thread/CoAP
+  mechanics it reuses.
+- **Full design:** see [`OLYMPUS_INTEGRATION.md`](OLYMPUS_INTEGRATION.md)
 
 ---
 
 ## Table of contents
 
+**Swarm + Olympus**
+- [Reconfigurable swarm + Olympus command center](#reconfigurable-swarm--olympus-command-center)
+- [Architecture](#architecture)
+- [The swarm protocol: current vs upgraded](#the-swarm-protocol-current-vs-upgraded)
+- [Run it step by step](#run-it-step-by-step)
+- [Repository layout](#repository-layout)
+
+**Underlying CoAP light demo**
 - [The demo in one picture](#the-demo-in-one-picture)
 - [Hardware notes for the XIAO](#hardware-notes-for-the-xiao)
 - [The shared CoAP interface](#the-shared-coap-interface)
@@ -33,6 +50,155 @@ Protocol) carried over Thread's IPv6 mesh.
 - [Current limitations / next phase](#current-limitations--next-phase)
 
 ---
+
+## Reconfigurable swarm + Olympus command center
+
+The swarm turns the stock light demo into a fleet of reconfigurable modules that
+report into Olympus. Each module announces itself on the mesh; the command station
+records its **position**, its **available sensors**, and whether it **contributes
+to** or only **consumes** swarm information, then keeps a live view of everything.
+An overlay autorouter connects the modules once they are online.
+
+### Architecture
+
+```
+ Agent (xN)                          RF mesh            Command station (Olympus host)
+ GPS/IMU → jetson_agent  --USB-CDC--  nRF (swarm_node) --OT/CoAP--> gateway nRF --USB-CDC--> olympus_link
+            |  (redundant IP: Zenoh + vehicle-api over WiFi/5G) ---------------------------^   |
+            v                                                                                   v
+        Olympus Zenoh  <-------------------------------- telemetry / topology / registry  ------+
+        Olympus dashboard renders swarm/{id}/telemetry (existing key)
+```
+
+| Component | Where | What it does |
+|-----------|-------|--------------|
+| [`proto/`](proto) | C + Python | one wire format both sides share (CoAP overlay + COBS/CRC serial framing) |
+| [`swarm_node/`](swarm_node) | Zephyr/C | module firmware (announce, telemetry, ranging) and the `--gateway` build |
+| [`jetson_agent/`](jetson_agent) | Python | per-agent companion: redundant IP path + Jetson sensor fusion |
+| [`olympus_link/`](olympus_link) | Python | command station: registry, localization, autorouter, push to Olympus |
+| [`sim/`](sim) | Python | PTY swarm simulator + automated end-to-end test (no hardware) |
+
+OpenThread keeps doing L2/L3 mesh routing and self-healing; the autorouter is an
+**application overlay** that assigns roles, aggregation parents (with a redundant
+secondary), and provider→consumer subscriptions, and pushes them back down the mesh.
+Modules without GPS are localized by the station: their RTT/RSSI ranges to GPS
+anchors are multilaterated (least squares), fused with IMU dead-reckoning. The
+nRF52840 cannot measure true time-of-flight, so ranges are coarse (meters–tens of
+meters) and surfaced as a position quality.
+
+### The swarm protocol: current vs upgraded
+
+The stock firmware was a button-driven 1-byte `PUT /light` plus a one-shot
+`GET /provisioning` — fire-and-forget, no sensors, no liveness. The upgrade keeps
+OpenThread's mesh and adds a CoAP overlay ([`proto/swarm_protocol.h`](proto/swarm_protocol.h)):
+
+| Resource | Dir | Purpose |
+|----------|-----|---------|
+| `swm/hello` | up | periodic descriptor: id, role (provider/consumer/relay), mount, sensor bitmap, battery — the "module online" event |
+| `swm/tlm` | up | position (gps/ranged/imu/fused) + heading + sensor readings + status |
+| `swm/nbr` | up | neighbor link table (RSSI + RTT range + quality) — feeds the autorouter |
+| `swm/rng` | p2p | two-way RTT ranging for GPS-denied localization |
+| `swm/rte` | down | route assignment: primary + secondary parent + subscriptions |
+| `swm/cmd` | down | command channel (set role/mount/rate, identify, reboot) |
+
+Up messages are non-confirmable realm-local multicast (flooded mesh-wide to the
+gateway); downlink is confirmable unicast (ACKed). Liveness is a `hello` heartbeat
++ last-seen TTL.
+
+### Run it step by step
+
+Requires **Python 3.9+** (stdlib only — no pip installs needed for the host side).
+
+#### A. Without hardware — simulator → command center
+
+Exercises the whole command-station pipeline on one machine.
+
+1. (optional) Run the automated end-to-end check:
+
+   ```bash
+   python3 sim/test_e2e.py        # registration, ranged localization, routing, failover, reconfig
+   ```
+
+2. Start the swarm simulator. It opens a pseudo-serial port and prints the path:
+
+   ```bash
+   python3 sim/swarm_sim.py
+   #  point olympus_link at:  --port /dev/pts/N
+   ```
+
+3. In another terminal, run the command-station service against that path. To just
+   watch it work with no Olympus running, use the dry-run sink:
+
+   ```bash
+   python3 -m olympus_link --port /dev/pts/N --sink dryrun -v
+   ```
+
+   You will see the gateway get discovered, modules announce (`HELLO`), register,
+   get localized by ranging, and receive `ROUTE` assignments (parent / secondary /
+   subscriptions).
+
+4. To drive a **live Olympus dashboard** instead, bring up Olympus and use the
+   `rest` sink:
+
+   ```bash
+   # in the olympus repo (separate checkout):
+   docker compose up -d zenoh-router vehicle-api dashboard
+   # back in nRF-swarm:
+   python3 -m olympus_link --port /dev/pts/N --prefix ceres --sink rest
+   # open http://localhost:3000 — modules appear on the map as they come online,
+   # move, drop out (failover), and reconfigure.
+   ```
+
+   `--prefix` must match the dashboard instance (the bundled dashboard polls
+   `ceres/**`; the Rust bridge default is `olympus`). Set `SWARM_VEHICLE_API_KEY`
+   only if vehicle-api auth is enabled (it is off by default).
+
+#### B. On hardware
+
+1. Build + flash the firmware (needs the nRF Connect SDK toolchain — see
+   [Building](#building)):
+
+   ```bash
+   cd swarm_node
+   ./build.sh                 # plain node (provider+relay) — flash >= 2 boards
+   ./build.sh --gateway       # command-station gateway — flash 1, wire it to the host
+   ```
+
+   Role / mount / name are Kconfig options (`CONFIG_SWARM_ROLE_*`,
+   `CONFIG_SWARM_MOUNT_VEHICLE`, `CONFIG_SWARM_NODE_NAME`, `CONFIG_SWARM_ATTACHED_TO`);
+   wire the modular IMU / GPS in the board overlay (`boards/*.overlay`). Missing
+   sensors degrade gracefully — their HELLO bit stays cleared and the station ranges
+   the module instead.
+
+2. Confirm the mesh forms: on each board's `ot` shell console, `ot state` reaches
+   `child` / `router` / `leader`.
+
+3. On the command-station host, wire the gateway's swarm **data** CDC port (the
+   second `/dev/ttyACM*` — the first is the `ot` shell) and run:
+
+   ```bash
+   python3 -m olympus_link --port /dev/ttyACM0 --prefix ceres --sink rest \
+       --vehicle-api http://localhost:3001
+   ```
+
+4. (optional, redundant IP path) On each agent's Jetson, run the companion:
+
+   ```bash
+   python3 -m jetson_agent --port /dev/ttyACM1 --prefix ceres \
+       --vehicle-api http://<command-station>:3001
+   # add SWARM_JETSON_GPS=gpsd to fold in a Jetson-side GPS
+   ```
+
+5. Power on modules — each registers as it comes online and the autorouter connects
+   them. Detach a module from its vehicle (or change its role) and the command
+   center updates live.
+
+---
+
+## The underlying CoAP light demo
+
+The swarm overlay above is built on the original Nordic CoAP demo, which still
+documents the Thread/CoAP mechanics it reuses (`coap_server` / `coap_client`).
 
 ## The demo in one picture
 
@@ -319,7 +485,19 @@ become `router`/`child`. Confirm with `ot state` on each and `ot router table` /
 ## Repository layout
 
 ```
-nRF-testing/
+nRF-swarm/
+│  ── swarm + Olympus integration ──
+├── proto/                       # shared wire protocol: swarm_protocol.h (C) + swarm_proto.py
+├── swarm_node/                  # reconfigurable module firmware (node + --gateway builds)
+│   ├── src/                     #   swarm_main / swarm_coap / sensors / ranging / serial_link
+│   ├── boards/                  #   data CDC-ACM + modular IMU/GPS chosen-node overlays
+│   └── prj.conf, overlay-gateway.conf, Kconfig, build.sh
+├── olympus_link/                # command station: registry, localization, autorouter, Olympus push
+├── jetson_agent/                # per-agent companion: redundant IP path + Jetson sensor fusion
+├── sim/                         # PTY swarm simulator + automated end-to-end test
+├── OLYMPUS_INTEGRATION.md       # full design + verification status
+│
+│  ── underlying CoAP light demo ──
 ├── coap_server/                 # CoAP "light" server (FTD) — flash to 2 boards
 │   ├── src/                     #   coap_server.c, ot_coap_utils.c/.h
 │   ├── interface/               #   shared CoAP contract header
@@ -339,9 +517,16 @@ nRF-testing/
 
 ## Current limitations / next phase
 
-This phase delivered **clean `xiao_ble` builds with a working USB serial console**.
-Because the XIAO has no user buttons, the original **button-driven actions are not
-yet wired to the hardware**:
+The **swarm overlay + Olympus integration** is now delivered (see the first half of
+this README and [`OLYMPUS_INTEGRATION.md`](OLYMPUS_INTEGRATION.md)). The `swarm_node`
+firmware replaces the missing XIAO buttons with the `swm/cmd` downlink channel
+(identify / set-role / set-mount) driven from the command center, and the whole
+host-side pipeline is verified against the simulator. The firmware itself still
+needs a hardware build with the nRF Connect SDK toolchain to validate on-device.
+
+For the **original light demo**, an earlier phase delivered clean `xiao_ble` builds
+with a working USB serial console. Because the XIAO has no user buttons, those
+**button-driven actions are not wired to the hardware**:
 
 - Server: opening the provisioning window (DK button 4) has no trigger.
 - Client: the unicast / multicast / provisioning / SED-toggle actions (DK buttons
