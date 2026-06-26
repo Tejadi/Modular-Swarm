@@ -1,0 +1,58 @@
+#
+# Copyright (c) 2024 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+menu "Zephyr Kernel"
+source "Kconfig.zephyr"
+endmenu
+
+menu "Swarm node configuration"
+
+config SWARM_NODE_NAME
+	string "Module display name"
+	default "swarm-node"
+	help
+	  Human-readable name shown in the Olympus command center.
+
+config SWARM_ATTACHED_TO
+	string "Vehicle this module is attached to"
+	default ""
+	help
+	  Vehicle id the module currently rides on. Empty means standalone.
+	  Can be changed at runtime via the SET_MOUNT command.
+
+config SWARM_FW_VERSION
+	int "Firmware version reported in HELLO"
+	default 1
+
+config SWARM_ROLE_PROVIDER
+	bool "Contributes sensor data to the swarm"
+	default y
+
+config SWARM_ROLE_CONSUMER
+	bool "Consumes swarm information"
+	default n
+
+config SWARM_ROLE_RELAY
+	bool "Relays traffic for neighbors"
+	default y
+
+config SWARM_MOUNT_VEHICLE
+	bool "Mounted on a vehicle (else standalone)"
+	default n
+
+config SWARM_GATEWAY
+	bool "Build as the command-station gateway"
+	default n
+	help
+	  Bridge the mesh to the Olympus host over serial instead of acting as a
+	  swarm member. Forwards every received module message to the host and
+	  injects route/cmd downlink back into the mesh.
+
+endmenu
+
+module = SWARM_NODE
+module-str = Swarm node
+source "$(ZEPHYR_BASE)/subsys/logging/Kconfig.template.log_config"

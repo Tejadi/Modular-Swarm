@@ -1,0 +1,31 @@
+sample:
+  description: Reconfigurable swarm module with Olympus CoAP overlay
+  name: Olympus Swarm Node
+
+tests:
+  sample.swarm.node:
+    sysbuild: true
+    build_only: true
+    tags:
+      - ci_build
+      - sysbuild
+      - ci_samples_openthread
+    platform_allow:
+      - nrf52840dk/nrf52840
+      - xiao_ble
+    integration_platforms:
+      - nrf52840dk/nrf52840
+  sample.swarm.gateway:
+    sysbuild: true
+    build_only: true
+    extra_args: >
+      EXTRA_CONF_FILE="overlay-gateway.conf"
+    tags:
+      - ci_build
+      - sysbuild
+      - ci_samples_openthread
+    platform_allow:
+      - nrf52840dk/nrf52840
+      - xiao_ble
+    integration_platforms:
+      - nrf52840dk/nrf52840

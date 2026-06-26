@@ -1,0 +1,42 @@
+/*
+ * nRF52840 DK — swarm module wiring.
+ *
+ * The DK's console/shell stays on the on-board UART (J-Link VCOM). This overlay
+ * adds a USB CDC-ACM function as the dedicated swarm data link to the Jetson
+ * (agent) or the Olympus host (gateway): /dev/ttyACM* after flashing.
+ *
+ * Sensor nodes are modular; uncomment to match the populated parts.
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+&zephyr_udc0 {
+	cdc_acm_swarm: cdc_acm_swarm {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/ {
+	chosen {
+		swarm,serial = &cdc_acm_swarm;
+		/* swarm,imu = &lsm6dsl; */
+		/* swarm,gps-uart = &uart1; */
+	};
+};
+
+/* Example IMU on i2c0 (P0.26/P0.27 on the DK). Adjust to the real part.
+&i2c0 {
+	status = "okay";
+	lsm6dsl: lsm6dsl@6a {
+		compatible = "st,lsm6dsl";
+		reg = <0x6a>;
+	};
+};
+*/
+
+/* Example GPS NMEA receiver on uart1.
+&uart1 {
+	status = "okay";
+	current-speed = <9600>;
+};
+*/

@@ -1,0 +1,37 @@
+/*
+ * Seeed XIAO nRF52840 — swarm module wiring.
+ *
+ * The XIAO exposes a single USB. The console/shell rides one CDC-ACM function;
+ * this overlay adds a SECOND CDC-ACM function as the dedicated swarm data link
+ * to the Jetson (agent) or the Olympus host (gateway). After flashing you get
+ * two /dev/ttyACM* ports: one for the `ot` shell, one for swarm framing.
+ *
+ * Sensor nodes are modular — uncomment and point them at the parts actually
+ * populated on this build. Absent sensors leave their HELLO bit cleared.
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+&zephyr_udc0 {
+	cdc_acm_swarm: cdc_acm_swarm {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/ {
+	chosen {
+		swarm,serial = &cdc_acm_swarm;
+		/* swarm,imu = &lsm6ds3; */     /* e.g. IMU on i2c0 */
+		/* swarm,gps-uart = &uart1; */  /* e.g. u-blox NMEA over UART */
+	};
+};
+
+/* Example modular IMU on the XIAO I2C bus — adjust the part/address to match.
+&i2c0 {
+	status = "okay";
+	lsm6ds3: lsm6ds3@6a {
+		compatible = "st,lsm6dsl";
+		reg = <0x6a>;
+	};
+};
+*/
