@@ -1,0 +1,43 @@
+# Umbrella stack — the whole command station in one `up`.
+#
+# Brings up Olympus (zenoh-router, vehicle-api, dashboard, brain/advisor, ollama)
+# PLUS the swarm-link bridge that feeds your nRF gateway/leader's mesh traffic
+# into Olympus. Run it on the computer the leader nRF is plugged into; open the
+# dashboard at http://<that-host>:3000.
+#
+#   SWARM_SERIAL_PORT=/dev/ttyACM1 docker compose -f docker-compose.swarm.yml up
+#
+# `include` merges the Olympus compose so everything shares one network. Point it
+# at your Olympus checkout — ../olympus today, or olympus/ once it is a submodule
+# under this repo. (Requires Docker Compose v2.20+. On older Compose, bring up
+# olympus/docker-compose.yml separately and run only the swarm-link service here
+# attached to the same external network.)
+include:
+  - ../olympus/docker-compose.yml
+
+services:
+  swarm-link:
+    build:
+      context: .
+      dockerfile: swarm_link/Dockerfile
+    container_name: swarm-link
+    environment:
+      # "rest" hits the zenoh REST API the dashboard already polls — robust across
+      # the docker network. Switch to "zenoh" for a native session if preferred.
+      - SWARM_SINK=${SWARM_SINK:-rest}
+      - SWARM_ZENOH_REST=http://zenoh-router:8000
+      - SWARM_KEY_PREFIX=${OLYMPUS_INSTANCE:-ceres}
+      - SWARM_VEHICLE_API=http://vehicle-api:3001
+      - SWARM_VEHICLE_API_KEY=${OLYMPUS_API_KEY:-}
+      - SWARM_SERIAL_PORT=${SWARM_SERIAL_PORT:-/dev/ttyACM1}
+      - SWARM_STATION_LAT=${SWARM_STATION_LAT:-37.7749}
+      - SWARM_STATION_LON=${SWARM_STATION_LON:--122.4194}
+    # Map the gateway/leader nRF's data serial port into the container.
+    devices:
+      - "${SWARM_SERIAL_PORT:-/dev/ttyACM1}:${SWARM_SERIAL_PORT:-/dev/ttyACM1}"
+    depends_on:
+      - zenoh-router
+      - vehicle-api
+    networks:
+      - olympus-net
+    restart: unless-stopped

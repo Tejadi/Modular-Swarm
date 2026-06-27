@@ -183,10 +183,13 @@ class SwarmSim:
 
     def _emit_hello(self, m: SimModule, now: float) -> None:
         m.seq += 1
+        # Vehicles are active (autonomous + overridable); standalones are passive.
+        caps = (sp.Capability.AUTONOMOUS | sp.Capability.OVERRIDABLE
+                if m.mount == sp.Mount.VEHICLE else sp.Capability.PASSIVE_RX)
         msg = sp.Hello(eui=m.eui_b(), role=m.role, mount=m.mount,
                        sensors=m.sensors, fw_version=1, battery_pct=int(m.battery),
                        uptime_s=int(now), name=m.name, attached_to=m.attached_to,
-                       seq=m.seq, flags=int(sp.Flags.RELAYED))
+                       capabilities=int(caps), seq=m.seq, flags=int(sp.Flags.RELAYED))
         self.emit(msg.encode())
 
     def _emit_telemetry(self, m: SimModule, now: float) -> None:
@@ -212,10 +215,19 @@ class SwarmSim:
             src, q = sp.PosSource.NONE, 0
 
         heading = (math.degrees(math.atan2(m.vy, m.vx))) % 360
+        # A GPS module runs the on-board EKF, so it carries the fused-kinematics
+        # trailer (velocity + uncertainty), mirroring the real firmware.
+        kin = {}
+        if m.has_gps:
+            kin = dict(has_kinematics=True, vel_n=m.vy, vel_e=m.vx,
+                       pos_std=1.5, hdg_std=3.0,
+                       ekf_flags=int(sp.EkfFlag.GPS_USED | sp.EkfFlag.IMU_USED
+                                     | sp.EkfFlag.CONVERGED))
         msg = sp.Telemetry(eui=m.eui_b(), status=sp.Status.SCANNING, pos_source=src,
                            lat=lat, lon=lon, alt=0.0, heading=heading,
                            battery_pct=int(m.battery), pos_quality=q,
-                           readings=readings, seq=m.seq, flags=int(sp.Flags.RELAYED))
+                           readings=readings, seq=m.seq, flags=int(sp.Flags.RELAYED),
+                           **kin)
         self.emit(msg.encode())
 
     def _emit_neighbors(self, m: SimModule) -> None:

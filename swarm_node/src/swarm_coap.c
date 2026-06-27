@@ -14,6 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/byteorder.h>
 #include <string.h>
 
 #include <openthread/coap.h>
@@ -35,7 +36,12 @@ static otIp6Address mcast_all_nodes;
  * command station can auto-discover which EUI is the gateway (tree root). */
 static inline uint8_t self_flags(void)
 {
-	return IS_ENABLED(CONFIG_SWARM_GATEWAY) ? SWARM_FLAG_GATEWAY : 0;
+	uint8_t f = IS_ENABLED(CONFIG_SWARM_GATEWAY) ? SWARM_FLAG_GATEWAY : 0;
+
+	if (IS_ENABLED(CONFIG_SWARM_LEADER)) {
+		f |= SWARM_FLAG_LEADER;
+	}
+	return f;
 }
 
 /* --- learned EUI64 -> IPv6 table (for gateway downlink + ranging) --- */
@@ -145,37 +151,61 @@ void swarm_coap_send_hello(void)
 	buf[off++] = g_node.attached_len;
 	memcpy(&buf[off], g_node.attached_to, g_node.attached_len);
 	off += g_node.attached_len;
+	/* Capability/permission trailer — how others classify this node. */
+	off += swarm_put_u16(&buf[off], g_node.capabilities);
 
 	swarm_send(SWARM_URI_HELLO, false, &mcast_all_nodes, buf, off);
 	/* Mirror to the companion computer (Jetson redundant IP path / gateway host). */
 	serial_link_send(buf, off);
 }
 
+/* Serialize a telemetry snapshot into buf; returns the byte length. */
+static uint32_t build_telemetry(uint8_t *buf, const struct swarm_tlm_snapshot *snap,
+				uint32_t seq)
+{
+	uint32_t off = swarm_hdr_write(buf, SWARM_MSG_TELEMETRY, self_flags(),
+				       g_node.eui, seq);
+	buf[off++] = snap->status;
+	buf[off++] = snap->pos_source;
+	off += swarm_put_i32(&buf[off], snap->lat_e7);
+	off += swarm_put_i32(&buf[off], snap->lon_e7);
+	off += swarm_put_i32(&buf[off], snap->alt_cm);
+	off += swarm_put_u16(&buf[off], snap->heading_cdeg);
+	buf[off++] = snap->battery_pct;
+	buf[off++] = snap->pos_quality;
+	buf[off++] = snap->n_readings;
+	for (int i = 0; i < snap->n_readings; i++) {
+		buf[off++] = snap->readings[i].channel;
+		memcpy(&buf[off], &snap->readings[i].value, sizeof(float));
+		off += sizeof(float);
+	}
+	/* Fused-kinematics trailer (EKF velocity + uncertainty). */
+	if (snap->has_kinematics) {
+		off += swarm_put_u16(&buf[off], (uint16_t)snap->vel_n_cms);
+		off += swarm_put_u16(&buf[off], (uint16_t)snap->vel_e_cms);
+		off += swarm_put_u16(&buf[off], snap->pos_std_cm);
+		off += swarm_put_u16(&buf[off], snap->hdg_std_cd);
+		buf[off++] = snap->ekf_flags;
+	}
+	return off;
+}
+
 void swarm_coap_send_telemetry(void)
 {
 	uint8_t buf[SWARM_MAX_FRAME];
 	struct swarm_tlm_snapshot snap;
+	uint32_t seq = swarm_next_seq();
 	uint32_t off;
 
+	/* Mesh + command station: the authoritative fix (Jetson pose while fresh). */
 	swarm_sensors_read(&snap);
-
-	off = swarm_hdr_write(buf, SWARM_MSG_TELEMETRY, self_flags(), g_node.eui, swarm_next_seq());
-	buf[off++] = snap.status;
-	buf[off++] = snap.pos_source;
-	off += swarm_put_i32(&buf[off], snap.lat_e7);
-	off += swarm_put_i32(&buf[off], snap.lon_e7);
-	off += swarm_put_i32(&buf[off], snap.alt_cm);
-	off += swarm_put_u16(&buf[off], snap.heading_cdeg);
-	buf[off++] = snap.battery_pct;
-	buf[off++] = snap.pos_quality;
-	buf[off++] = snap.n_readings;
-	for (int i = 0; i < snap.n_readings; i++) {
-		buf[off++] = snap.readings[i].channel;
-		memcpy(&buf[off], &snap.readings[i].value, sizeof(float));
-		off += sizeof(float);
-	}
-
+	off = build_telemetry(buf, &snap, seq);
 	swarm_send(SWARM_URI_TELEMETRY, false, &mcast_all_nodes, buf, off);
+
+	/* Jetson (serial): the nRF's OWN EKF fix — an independent input for the
+	 * Jetson EKF, never the pose the Jetson just injected. */
+	swarm_sensors_read_own(&snap);
+	off = build_telemetry(buf, &snap, seq);
 	serial_link_send(buf, off);
 }
 
@@ -227,6 +257,13 @@ void swarm_coap_send_downlink(const uint8_t *payload, uint16_t len)
 		return;
 	}
 	msg_type = payload[2];
+
+	if (msg_type == SWARM_MSG_BROADCAST) {
+		/* Fleet-wide multicast (leader override / command) — no unicast target. */
+		swarm_send(SWARM_URI_BROADCAST, false, &mcast_all_nodes, payload, len);
+		return;
+	}
+
 	target_eui = &payload[4]; /* header.eui = the module this is addressed to */
 
 	if (!peer_lookup(target_eui, &dest)) {
@@ -306,6 +343,13 @@ static void apply_cmd(const uint8_t *body, uint16_t len)
 			LOG_INF("cmd: mount=%d", g_node.mount);
 		}
 		break;
+	case SWARM_CMD_SET_PERMISSIONS:
+		if (plen >= 2) {
+			g_node.capabilities = (uint16_t)params[0] |
+					      ((uint16_t)params[1] << 8);
+			LOG_INF("cmd: capabilities=0x%04x", g_node.capabilities);
+		}
+		break;
 	case SWARM_CMD_IDENTIFY:
 		sensors_identify();
 		break;
@@ -318,6 +362,56 @@ static void apply_cmd(const uint8_t *body, uint16_t len)
 	}
 }
 
+/* Action ops are mission directives executed by the Jetson brain, not the nRF.
+ * The nRF only gates them on this node's permissions and forwards them up. */
+static bool is_action_op(uint8_t op)
+{
+	return op == SWARM_CMD_SET_WAYPOINT || op == SWARM_CMD_SET_MISSION ||
+	       op == SWARM_CMD_OVERRIDE || op == SWARM_CMD_CLEAR_OVERRIDE;
+}
+
+/* Dispatch a CMD/BROADCAST body: forward action ops to the Jetson when this
+ * node is overridable, otherwise apply config ops locally. `trusted` is true
+ * when the frame came from the leader or the command-station gateway. */
+static void handle_command(const uint8_t *buf, uint16_t len,
+			   const uint8_t *body, uint16_t body_len, bool trusted)
+{
+	if (body_len < 1) {
+		return;
+	}
+	if (is_action_op(body[0])) {
+		bool overridable = g_node.capabilities & SWARM_CAP_OVERRIDABLE;
+		if (overridable && trusted) {
+			/* Hand the whole frame to the Jetson brain over serial. */
+			serial_link_send(buf, len);
+		} else {
+			LOG_DBG("dropped action op 0x%02x (overridable=%d trusted=%d)",
+				body[0], overridable, trusted);
+		}
+		return;
+	}
+	apply_cmd(body, body_len);
+}
+
+/* Jetson -> nRF: adopt an authoritative fused pose for broadcast. */
+static void apply_pose_inject(const uint8_t *b, uint16_t len)
+{
+	if (len < 27) {
+		return;
+	}
+	int32_t lat = (int32_t)sys_get_le32(&b[0]);
+	int32_t lon = (int32_t)sys_get_le32(&b[4]);
+	int32_t alt = (int32_t)sys_get_le32(&b[8]);
+	uint16_t hdg = sys_get_le16(&b[12]);
+	int16_t vn = (int16_t)sys_get_le16(&b[14]);
+	int16_t ve = (int16_t)sys_get_le16(&b[16]);
+	uint16_t ps = sys_get_le16(&b[18]);
+	uint16_t hs = sys_get_le16(&b[20]);
+	uint8_t sf = b[22];
+	/* ts_ms (b[23..26]) is the Jetson clock; freshness is stamped on receipt. */
+	sensors_inject_pose(lat, lon, alt, hdg, vn, ve, ps, hs, sf);
+}
+
 void swarm_handle_payload(const uint8_t *buf, uint16_t len,
 			  const otIp6Address *src)
 {
@@ -325,9 +419,11 @@ void swarm_handle_payload(const uint8_t *buf, uint16_t len,
 		return;
 	}
 	uint8_t msg_type = buf[2];
+	uint8_t hdr_flags = buf[3];
 	const uint8_t *eui = &buf[4];
 	const uint8_t *body = &buf[SWARM_HDR_LEN];
 	uint16_t body_len = len - SWARM_HDR_LEN;
+	bool trusted = hdr_flags & (SWARM_FLAG_LEADER | SWARM_FLAG_GATEWAY);
 
 	if (src) {
 		peer_update(eui, src);
@@ -338,6 +434,18 @@ void swarm_handle_payload(const uint8_t *buf, uint16_t len,
 	case SWARM_MSG_TELEMETRY:
 	case SWARM_MSG_NEIGHBORS:
 		IF_ENABLED(CONFIG_SWARM_GATEWAY, (serial_link_send(buf, len);));
+#if defined(CONFIG_SWARM_FORWARD_PEERS) && !defined(CONFIG_SWARM_GATEWAY)
+		/* Plain node: mirror peer telemetry to our Jetson (tagged RELAYED so it
+		 * isn't confused with our own messages) for the Jetson EKF peer fusion.
+		 * `src` is set only for frames from the mesh, never our own. */
+		if (src && len <= SWARM_MAX_FRAME) {
+			uint8_t fwd[SWARM_MAX_FRAME];
+
+			memcpy(fwd, buf, len);
+			fwd[3] |= SWARM_FLAG_RELAYED;
+			serial_link_send(fwd, len);
+		}
+#endif
 		break;
 	case SWARM_MSG_RANGE_REQ:
 	case SWARM_MSG_RANGE_RESP:
@@ -348,7 +456,23 @@ void swarm_handle_payload(const uint8_t *buf, uint16_t len,
 		apply_route(body, body_len);
 		break;
 	case SWARM_MSG_CMD:
-		apply_cmd(body, body_len);
+		handle_command(buf, len, body, body_len, trusted);
+		break;
+	case SWARM_MSG_POSE_INJECT:
+		/* Authoritative fused pose from this node's Jetson (over serial). */
+		apply_pose_inject(body, body_len);
+		break;
+	case SWARM_MSG_MESH_SEND:
+		/* Jetson asked to relay an opaque swarm frame onto the mesh. */
+		if (body_len >= SWARM_HDR_LEN) {
+			swarm_send(SWARM_URI_BROADCAST, false, &mcast_all_nodes,
+				   body, body_len);
+		}
+		break;
+	case SWARM_MSG_BROADCAST:
+		/* Leader fleet command — permission-gated, action ops to the Jetson. */
+		handle_command(buf, len, body, body_len, trusted);
+		IF_ENABLED(CONFIG_SWARM_GATEWAY, (serial_link_send(buf, len);));
 		break;
 	default:
 		break;
@@ -410,6 +534,7 @@ DEFINE_HANDLER(neighbors_handler)
 DEFINE_HANDLER(range_handler)
 DEFINE_HANDLER(route_handler)
 DEFINE_HANDLER(cmd_handler)
+DEFINE_HANDLER(broadcast_handler)
 
 #define SWARM_RESOURCE(var, uri, handler)                                      \
 	static otCoapResource var = {                                          \
@@ -422,6 +547,7 @@ SWARM_RESOURCE(res_nbr, SWARM_URI_NEIGHBORS, neighbors_handler);
 SWARM_RESOURCE(res_rng, SWARM_URI_RANGE, range_handler);
 SWARM_RESOURCE(res_rte, SWARM_URI_ROUTE, route_handler);
 SWARM_RESOURCE(res_cmd, SWARM_URI_CMD, cmd_handler);
+SWARM_RESOURCE(res_bc, SWARM_URI_BROADCAST, broadcast_handler);
 
 int swarm_coap_init(void)
 {
@@ -444,6 +570,7 @@ int swarm_coap_init(void)
 	otCoapAddResource(g_node.ot, &res_rng);
 	otCoapAddResource(g_node.ot, &res_rte);
 	otCoapAddResource(g_node.ot, &res_cmd);
+	otCoapAddResource(g_node.ot, &res_bc);
 
 	error = otCoapStart(g_node.ot, SWARM_COAP_PORT);
 	if (error != OT_ERROR_NONE) {

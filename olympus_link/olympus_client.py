@@ -143,6 +143,14 @@ class OlympusClient:
                 "sensors": m.sensor_names(),
                 "position_source": _POS_SOURCE_NAMES.get(m.position.source, "none"),
                 "position_quality": m.position.quality,
+                "velocity": {"north": round(m.position.vel_n, 3),
+                             "east": round(m.position.vel_e, 3)},
+                "speed_mps": round(m.position.speed, 2),
+                "position_std_m": round(m.position.pos_std, 2),
+                "heading_std_deg": round(m.position.hdg_std, 1),
+                "ekf_flags": m.position.ekf_flags,
+                "node_class": m.node_class(),
+                "capabilities": sp.capability_list(m.capabilities),
                 "parent": m.route.primary,
                 "secondary_parent": m.route.secondary,
                 "subscriptions": m.route.subscriptions,
@@ -155,22 +163,28 @@ class OlympusClient:
         }
 
     def _register_body(self, m: ModuleState) -> dict:
-        # Pure consumers get observer tier (no command authority); contributors
-        # get partner tier. The module↔vehicle link rides in capabilities so no
-        # Olympus model change is needed.
-        trust = "partner" if m.is_provider else "observer"
+        # The capability model drives command authority: an ACTIVE node (autonomous
+        # / overridable) is a partner that accepts mission commands; a PASSIVE node
+        # is an observer the leader's gate refuses to command.
+        node_class = m.node_class()
+        active = node_class == "active"
+        trust = "partner" if active else "observer"
         caps = [f"sensor:{s}" for s in m.sensor_names()]
         caps.append(f"contribution:{m.contribution()}")
+        caps.append(f"class:{node_class}")
+        caps += [f"cap:{c}" for c in sp.capability_list(m.capabilities)]
         caps.append(f"mount:{'vehicle' if m.mount == sp.Mount.VEHICLE else 'standalone'}")
         if m.attached_to:
             caps.append(f"attached_to:{m.attached_to}")
         manifest = {
             "provides_telemetry": True,
-            "provides_detections": False,
+            "provides_detections": bool(m.sensors & sp.Sensor.CAMERA),
             "provides_features": m.is_provider,
-            "accepted_commands": ["IDENTIFY", "SET_ROLE", "SET_RATE"] if m.is_consumer or m.is_provider else [],
-            "command_authority": "advisory" if m.is_provider else "none",
-            "participates_in_cbba": False,
+            "accepted_commands": (["IDENTIFY", "SET_ROLE", "SET_RATE",
+                                   "SET_WAYPOINT", "SET_MISSION", "OVERRIDE"]
+                                  if active else ["IDENTIFY"]),
+            "command_authority": "advisory" if active else "none",
+            "participates_in_cbba": active and m.is_provider,
             "ttl_seconds": 0,
             "data_encryption_required": False,
         }

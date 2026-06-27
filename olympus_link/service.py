@@ -13,6 +13,7 @@ import logging
 
 import swarm_proto as sp
 from autorouter import Autorouter
+from commands import CommandListener
 from config import Config
 from localization import localize
 from model import Registry
@@ -28,6 +29,7 @@ class SwarmLinkService:
         self.reg = Registry(cfg.gateway_eui)
         self.router = Autorouter(self.reg, cfg)
         self.olympus = OlympusClient(cfg)
+        self.commands: CommandListener | None = None
         self.serial: AsyncSerial | None = None
         self._seq = 0
         self._stop = asyncio.Event()
@@ -124,6 +126,18 @@ class SwarmLinkService:
         self.serial.write_payload(cmd.encode())
         log.info("CMD %s op=%s", eui, op)
 
+    def send_broadcast(self, op: int, params: bytes = b"") -> None:
+        """Fleet-wide multicast command (leader override). The leader nRF re-emits
+        it to ff03::1; only OVERRIDABLE nodes act on action ops."""
+        if self.serial is None:
+            return
+        self._seq += 1
+        leader = self.reg.gateway_eui or "0" * 16
+        bc = sp.Broadcast(eui=sp.eui_bytes(leader), op=op, params=params,
+                          seq=self._seq, flags=int(sp.Flags.LEADER | sp.Flags.OVERRIDE))
+        self.serial.write_payload(bc.encode())
+        log.info("BROADCAST op=%s", op)
+
     # --- lifecycle ---
 
     async def run(self) -> None:
@@ -132,6 +146,9 @@ class SwarmLinkService:
         self.serial = AsyncSerial(self.cfg.serial_port, self._on_payload,
                                   self.cfg.serial_baud)
         self.serial.start(loop)
+        # Operator command downlink: Olympus -> mesh (needs the zenoh lib).
+        self.commands = CommandListener(self.cfg, self, loop)
+        self.commands.start()
         log.info("olympus_link up: prefix=%s sink=%s gateway=%s",
                  self.cfg.key_prefix, self.cfg.sink, self.cfg.gateway_eui)
         try:
@@ -145,6 +162,8 @@ class SwarmLinkService:
                 except asyncio.TimeoutError:
                     pass
         finally:
+            if self.commands is not None:
+                self.commands.stop()
             self.serial.close()
             self.olympus.close()
 

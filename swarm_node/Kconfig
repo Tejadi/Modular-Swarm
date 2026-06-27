@@ -43,6 +43,33 @@ config SWARM_MOUNT_VEHICLE
 	bool "Mounted on a vehicle (else standalone)"
 	default n
 
+# --- capability / permission model (advertised in HELLO, see swarm_capability) ---
+# Defaults make a vehicle "active" (autonomous + overridable) and a standalone
+# module "passive" (transmits its sensors, accepts no action commands).
+
+config SWARM_CAP_AUTONOMOUS
+	bool "Active: runs decentralized mission policy on its Jetson"
+	default y if SWARM_MOUNT_VEHICLE
+	default n
+
+config SWARM_CAP_OVERRIDABLE
+	bool "Active: accepts overriding action commands from a trusted leader"
+	default y if SWARM_MOUNT_VEHICLE
+	default n
+
+config SWARM_CAP_PASSIVE_RX
+	bool "Passive: receive-only swarm member (no action authority)"
+	default y if !SWARM_MOUNT_VEHICLE && !SWARM_GATEWAY
+	default n
+
+config SWARM_CAP_BEACON_TX
+	bool "Passive beacon / waypoint station (transmits its sensors only)"
+	default n
+
+config SWARM_CAP_RELAY_ONLY
+	bool "Forwards traffic only (no sensing or acting)"
+	default n
+
 config SWARM_GATEWAY
 	bool "Build as the command-station gateway"
 	default n
@@ -50,6 +77,26 @@ config SWARM_GATEWAY
 	  Bridge the mesh to the Olympus host over serial instead of acting as a
 	  swarm member. Forwards every received module message to the host and
 	  injects route/cmd downlink back into the mesh.
+
+config SWARM_FORWARD_PEERS
+	bool "Forward peer telemetry to the Jetson (for peer-range fusion)"
+	default y if !SWARM_GATEWAY
+	default n
+	help
+	  A plain node mirrors the peer HELLO/TELEMETRY it hears on the mesh to its
+	  Jetson (tagged RELAYED so the agent never mistakes them for its own), so
+	  the Jetson EKF can use nearby peers (<= 50 m) as range constraints. Costs a
+	  little serial bandwidth; harmless if the node has no Jetson.
+
+config SWARM_LEADER
+	bool "Build as the base-station leader"
+	default n
+	help
+	  The leader is a gateway that ALSO senses (its own GPS/IMU EKF, as a fleet
+	  position anchor) and can broadcast override commands fleet-wide. Implies
+	  gateway bridging; additionally announces/streams telemetry and tags its
+	  frames SWARM_FLAG_LEADER so overridable nodes accept its commands. Enable
+	  together with SWARM_GATEWAY (see overlay-leader.conf).
 
 endmenu
 

@@ -32,6 +32,7 @@
 #define SWARM_URI_RANGE     "swm/rng"       /* two-way RTT ranging              */
 #define SWARM_URI_ROUTE     "swm/rte"       /* downlink route assignment        */
 #define SWARM_URI_CMD       "swm/cmd"       /* downlink command                 */
+#define SWARM_URI_BROADCAST "swm/bc"        /* leader multicast command         */
 
 /* Framing constants. */
 #define SWARM_MAGIC   0x53u   /* 'S' */
@@ -47,14 +48,19 @@ enum swarm_msg_type {
 	SWARM_MSG_NEIGHBORS  = 0x03,
 	SWARM_MSG_RANGE_REQ  = 0x04,
 	SWARM_MSG_RANGE_RESP = 0x05,
+	SWARM_MSG_POSE_INJECT = 0x06, /* Jetson -> nRF (serial): authoritative fused pose  */
+	SWARM_MSG_MESH_SEND  = 0x07,  /* Jetson -> nRF (serial): opaque frame to relay      */
 	SWARM_MSG_ROUTE      = 0x10, /* downlink */
 	SWARM_MSG_CMD        = 0x11, /* downlink */
+	SWARM_MSG_BROADCAST  = 0x12, /* leader -> all (multicast): command / override      */
 };
 
 /* Header flags bitfield. */
 enum swarm_flags {
-	SWARM_FLAG_GATEWAY = 1u << 0, /* sender is the command-station gateway */
-	SWARM_FLAG_RELAYED = 1u << 1, /* gateway forwarded this from the mesh   */
+	SWARM_FLAG_GATEWAY  = 1u << 0, /* sender is the command-station gateway   */
+	SWARM_FLAG_RELAYED  = 1u << 1, /* gateway forwarded this from the mesh    */
+	SWARM_FLAG_LEADER   = 1u << 2, /* sender is the base-station leader       */
+	SWARM_FLAG_OVERRIDE = 1u << 3, /* command overrides decentralized policy  */
 };
 
 /* Role bitfield (who the module is to the swarm). A pure consumer sets only
@@ -71,7 +77,7 @@ enum swarm_mount {
 	SWARM_MOUNT_VEHICLE    = 1,
 };
 
-/* Which sensors the modular stack currently has populated (HELLO bitmap). */
+/* Which sensors the modular stack currently has populated (HELLO bitmap, u16). */
 enum swarm_sensor_bit {
 	SWARM_SENS_GPS         = 1u << 0,
 	SWARM_SENS_IMU         = 1u << 1,
@@ -81,6 +87,7 @@ enum swarm_sensor_bit {
 	SWARM_SENS_HUMIDITY    = 1u << 5,
 	SWARM_SENS_RANGEFINDER = 1u << 6,
 	SWARM_SENS_CAMERA      = 1u << 7,
+	SWARM_SENS_VIO         = 1u << 8, /* Jetson visual-inertial odometry present */
 };
 
 /* How the position carried in TELEMETRY was derived. */
@@ -115,23 +122,95 @@ enum swarm_channel {
 	SWARM_CH_GYRO_X     = 0x13,
 	SWARM_CH_GYRO_Y     = 0x14,
 	SWARM_CH_GYRO_Z     = 0x15,
+	SWARM_CH_VEL_N      = 0x16, /* EKF north velocity, m/s */
+	SWARM_CH_VEL_E      = 0x17, /* EKF east velocity, m/s  */
+	SWARM_CH_VEL_D      = 0x18, /* EKF down velocity, m/s (3D) */
+	SWARM_CH_POS_VAR    = 0x19, /* EKF horizontal position variance, m^2 */
+	SWARM_CH_VEL_VAR    = 0x1A, /* EKF velocity variance, (m/s)^2 */
+	SWARM_CH_HDG_VAR    = 0x1B, /* EKF heading variance, deg^2 */
+	SWARM_CH_MAG_HDG    = 0x1C, /* magnetometer heading, deg */
 	SWARM_CH_RANGEFINDER = 0x20,
 	SWARM_CH_BATTERY_V  = 0x30,
 };
 
-/* Downlink command opcodes (CMD body). */
+/* Downlink command opcodes (CMD / BROADCAST body). */
 enum swarm_cmd_op {
-	SWARM_CMD_NOOP        = 0,
-	SWARM_CMD_SET_ROLE    = 1, /* param: role byte                        */
-	SWARM_CMD_IDENTIFY    = 2, /* blink LED to locate the module          */
-	SWARM_CMD_SET_RATE    = 3, /* param: telemetry period in deciseconds  */
-	SWARM_CMD_REBOOT      = 4,
-	SWARM_CMD_LIGHT       = 5, /* param: legacy light command byte        */
-	SWARM_CMD_SET_MOUNT   = 6, /* param: mount byte + attached_to string  */
+	SWARM_CMD_NOOP            = 0,
+	SWARM_CMD_SET_ROLE       = 1,  /* param: role byte                        */
+	SWARM_CMD_IDENTIFY       = 2,  /* blink LED to locate the module          */
+	SWARM_CMD_SET_RATE       = 3,  /* param: telemetry period in deciseconds  */
+	SWARM_CMD_REBOOT         = 4,
+	SWARM_CMD_LIGHT          = 5,  /* param: legacy light command byte        */
+	SWARM_CMD_SET_MOUNT      = 6,  /* param: mount byte + attached_to string  */
+	SWARM_CMD_SET_WAYPOINT   = 7,  /* param: waypoint block (see below)       */
+	SWARM_CMD_SET_MISSION    = 8,  /* param: mission_type u8 + ttl_s u16      */
+	SWARM_CMD_OVERRIDE       = 9,  /* param: waypoint block; preempts policy  */
+	SWARM_CMD_CLEAR_OVERRIDE = 10, /* resume decentralized policy             */
+	SWARM_CMD_SET_PERMISSIONS = 11,/* param: capabilities u16                 */
 };
+
+/* Mission types carried in SET_WAYPOINT / SET_MISSION / OVERRIDE params and
+ * mirrored by the Olympus brain MissionType enum. */
+enum swarm_mission_type {
+	SWARM_MISSION_EXPLORE  = 0,
+	SWARM_MISSION_SEARCH   = 1,
+	SWARM_MISSION_COVERAGE = 2,
+	SWARM_MISSION_PATROL   = 3,
+	SWARM_MISSION_GOTO     = 4,
+	SWARM_MISSION_LOITER   = 5,
+	SWARM_MISSION_RTL      = 6,
+};
+
+/* Capability / permission bitmask (HELLO trailer + SET_PERMISSIONS param). */
+enum swarm_capability {
+	SWARM_CAP_OVERRIDABLE = 1u << 0, /* leader may override this node          */
+	SWARM_CAP_AUTONOMOUS  = 1u << 1, /* runs decentralized mission policy      */
+	SWARM_CAP_PASSIVE_RX  = 1u << 2, /* receive-only swarm member              */
+	SWARM_CAP_BEACON_TX   = 1u << 3, /* passive beacon / waypoint station      */
+	SWARM_CAP_RELAY_ONLY  = 1u << 4, /* forwards traffic only                  */
+};
+
+/* ekf_flags bits in the TELEMETRY fused-kinematics trailer. */
+enum swarm_ekf_flag {
+	SWARM_EKF_GPS_USED  = 1u << 0,
+	SWARM_EKF_IMU_USED  = 1u << 1,
+	SWARM_EKF_VIO_USED  = 1u << 2, /* set when a Jetson POSE_INJECT was adopted */
+	SWARM_EKF_PEER_USED = 1u << 3,
+	SWARM_EKF_CONVERGED = 1u << 4,
+};
+
+/* A Jetson POSE_INJECT is treated as authoritative only while this fresh. */
+#define SWARM_POSE_FRESH_MS 2000u
 
 /* A sentinel EUI64 (all 0xFF) means "no parent / unassigned" in ROUTE. */
 #define SWARM_EUI64_NONE { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }
+
+/*
+ * Appended / new body layouts (all little-endian). Trailers are append-only and
+ * length-guarded: a decoder that predates a trailer simply stops after the
+ * fields it knows, so VERSION stays 0x01.
+ *
+ * TELEMETRY fused-kinematics trailer (after the readings TLVs), 9 bytes:
+ *   vel_n_cms  i16   north velocity, cm/s
+ *   vel_e_cms  i16   east  velocity, cm/s
+ *   pos_std_cm u16   1-sigma horizontal position std, cm
+ *   hdg_std_cd u16   1-sigma heading std, centidegrees
+ *   ekf_flags  u8    enum swarm_ekf_flag
+ *
+ * HELLO trailer (after the attached_to string), 2 bytes:
+ *   capabilities u16   enum swarm_capability
+ *
+ * POSE_INJECT body (Jetson -> nRF over serial), 27 bytes:
+ *   lat_e7 i32, lon_e7 i32, alt_cm i32, heading_cdeg u16,
+ *   vel_n_cms i16, vel_e_cms i16, pos_std_cm u16, hdg_std_cd u16,
+ *   src_flags u8 (enum swarm_ekf_flag), ts_ms u32
+ *
+ * MESH_SEND body: a complete swarm_proto frame (header+body) to relay verbatim.
+ * BROADCAST / CMD body: op u8, plen u8, params[plen].
+ * SET_WAYPOINT / OVERRIDE params, 16 bytes:
+ *   lat_e7 i32, lon_e7 i32, alt_cm i32, mission_type u8 (enum swarm_mission_type),
+ *   priority u8, ttl_s u16
+ */
 
 /*
  * Wire header. Packed so the layout is identical on every target. All

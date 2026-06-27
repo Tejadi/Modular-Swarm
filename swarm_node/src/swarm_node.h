@@ -27,6 +27,7 @@ struct swarm_node {
 	uint8_t  role;          /* enum swarm_role bitfield      */
 	uint8_t  mount;         /* enum swarm_mount              */
 	uint16_t sensors;       /* enum swarm_sensor_bit bitmap  */
+	uint16_t capabilities;  /* enum swarm_capability bitmask */
 	char     attached_to[32];
 	uint8_t  attached_len;
 	char     name[24];

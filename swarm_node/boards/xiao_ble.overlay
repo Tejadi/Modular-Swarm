@@ -1,13 +1,16 @@
 /*
  * Seeed XIAO nRF52840 — swarm module wiring.
  *
- * The XIAO exposes a single USB. The console/shell rides one CDC-ACM function;
- * this overlay adds a SECOND CDC-ACM function as the dedicated swarm data link
- * to the Jetson (agent) or the Olympus host (gateway). After flashing you get
- * two /dev/ttyACM* ports: one for the `ot` shell, one for swarm framing.
+ * USB enumerates TWO CDC-ACM functions: the console/shell on the board default,
+ * and a SECOND function (cdc_acm_swarm) as the dedicated swarm data link to the
+ * Jetson (node) or the Olympus host (gateway). The GPS rides the hardware UART
+ * (uart0 on D6/D7) and the IMU the I2C bus (i2c0 on D4/D5), mirroring the proven
+ * coap_server GPS wiring.
  *
- * Sensor nodes are modular — uncomment and point them at the parts actually
- * populated on this build. Absent sensors leave their HELLO bit cleared.
+ * Hardware on this build:
+ *   - IMU: Adafruit MPU-6050 6-DoF (STEMMA QT / I2C) @ 0x68 on i2c0 (D4/D5).
+ *   - GPS: Adafruit Ultimate GPS Breakout v3 (NMEA) @ 9600 on uart0 (D6/D7).
+ * Absent sensors leave their HELLO bit clear and the EKF runs with fewer inputs.
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
@@ -18,20 +21,30 @@
 	};
 };
 
-/ {
-	chosen {
-		swarm,serial = &cdc_acm_swarm;
-		/* swarm,imu = &lsm6ds3; */     /* e.g. IMU on i2c0 */
-		/* swarm,gps-uart = &uart1; */  /* e.g. u-blox NMEA over UART */
+/* GPS: Adafruit Ultimate GPS v3, NMEA over the hardware UART
+ * (XIAO D7=RX/P1.12 <- GPS TX, D6=TX/P1.11 -> GPS RX). */
+&uart0 {
+	status = "okay";
+	current-speed = <9600>;
+};
+
+/* IMU: Adafruit MPU-6050 over STEMMA QT / I2C0 (XIAO D4=SDA/P0.04, D5=SCL/P0.05).
+ * AD0 low -> 0x68. The Zephyr invensense,mpu6050 driver reports accel in m/s^2
+ * and gyro in rad/s, which is exactly what sensors.c / ekf.c expect. */
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;   /* 400 kHz */
+	mpu6050: mpu6050@68 {
+		compatible = "invensense,mpu6050";
+		reg = <0x68>;
+		/* int-gpios = <&gpio0 N GPIO_ACTIVE_HIGH>;  // optional data-ready INT */
 	};
 };
 
-/* Example modular IMU on the XIAO I2C bus — adjust the part/address to match.
-&i2c0 {
-	status = "okay";
-	lsm6ds3: lsm6ds3@6a {
-		compatible = "st,lsm6dsl";
-		reg = <0x6a>;
+/ {
+	chosen {
+		swarm,serial = &cdc_acm_swarm;
+		swarm,imu = &mpu6050;
+		swarm,gps-uart = &uart0;
 	};
 };
-*/

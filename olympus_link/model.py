@@ -24,10 +24,20 @@ class Position:
     source: int = sp.PosSource.NONE  # how it was derived
     quality: int = 0                 # 0..255, 255 best
     fixed_at: float = 0.0            # monotonic time of last update
+    # Fused-kinematics (EKF) outputs — carried from the telemetry trailer.
+    vel_n: float = 0.0               # m/s
+    vel_e: float = 0.0               # m/s
+    pos_std: float = 0.0             # m, 1-sigma
+    hdg_std: float = 0.0             # deg, 1-sigma
+    ekf_flags: int = 0               # enum EkfFlag
 
     @property
     def valid(self) -> bool:
         return self.source != sp.PosSource.NONE and (self.lat != 0.0 or self.lon != 0.0)
+
+    @property
+    def speed(self) -> float:
+        return (self.vel_n ** 2 + self.vel_e ** 2) ** 0.5
 
 
 @dataclass
@@ -56,6 +66,7 @@ class ModuleState:
     mount: int = sp.Mount.STANDALONE
     attached_to: str = ""
     sensors: int = 0
+    capabilities: int = 0
     fw_version: int = 0
     battery_pct: int = 100
     status: int = sp.Status.IDLE
@@ -96,6 +107,34 @@ class ModuleState:
     def has_imu(self) -> bool:
         return bool(self.sensors & sp.Sensor.IMU)
 
+    # --- capability / permission model (the passive-vs-active question) ---
+    @property
+    def is_overridable(self) -> bool:
+        return bool(self.capabilities & sp.Capability.OVERRIDABLE)
+
+    @property
+    def is_autonomous(self) -> bool:
+        return bool(self.capabilities & sp.Capability.AUTONOMOUS)
+
+    def node_class(self) -> str:
+        """One word for the command center: how this node may be commanded.
+
+        active  — runs decentralized policy and/or obeys leader overrides
+        passive — transmits its sensors but accepts no action commands
+        beacon  — passive fixed sensor/waypoint station
+        relay   — forwards traffic only
+        Legacy nodes (capabilities == 0) are treated as passive: with no
+        OVERRIDABLE bit the leader's permission gate refuses to command them.
+        """
+        c = self.capabilities
+        if c & sp.Capability.BEACON_TX:
+            return "beacon"
+        if c & (sp.Capability.AUTONOMOUS | sp.Capability.OVERRIDABLE):
+            return "active"
+        if c & sp.Capability.RELAY_ONLY:
+            return "relay"
+        return "passive"
+
     def sensor_names(self) -> list[str]:
         return sp.sensor_list(self.sensors)
 
@@ -134,14 +173,16 @@ class Registry:
     def on_hello(self, msg: sp.Hello) -> ModuleState:
         eui = sp.eui_str(msg.eui)
         m = self._touch(eui)
-        # A reconfiguration (role/mount/sensors/attachment change) must re-register.
+        # A reconfiguration (role/mount/sensors/caps/attachment change) re-registers.
         changed = (m.role != msg.role or m.mount != msg.mount
-                   or m.sensors != msg.sensors or m.attached_to != msg.attached_to)
+                   or m.sensors != msg.sensors or m.attached_to != msg.attached_to
+                   or m.capabilities != msg.capabilities)
         m.name = msg.name or m.name
         m.role = msg.role
         m.mount = msg.mount
         m.attached_to = msg.attached_to
         m.sensors = msg.sensors
+        m.capabilities = msg.capabilities
         m.fw_version = msg.fw_version
         m.battery_pct = msg.battery_pct
         m.last_seq = msg.seq
@@ -160,6 +201,8 @@ class Registry:
             m.position = Position(
                 lat=msg.lat, lon=msg.lon, alt=msg.alt, heading=msg.heading,
                 source=msg.pos_source, quality=msg.pos_quality,
+                vel_n=msg.vel_n, vel_e=msg.vel_e, pos_std=msg.pos_std,
+                hdg_std=msg.hdg_std, ekf_flags=msg.ekf_flags,
                 fixed_at=time.monotonic())
         m.readings = {r.channel: r.value for r in msg.readings}
         return m

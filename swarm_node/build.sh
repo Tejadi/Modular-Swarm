@@ -26,6 +26,7 @@ while [ $# -gt 0 ]; do
     --pristine) PRISTINE="-p always" ;;
     --flash)    DO_FLASH=1 ;;
     --gateway)  EXTRA="-DEXTRA_CONF_FILE=overlay-gateway.conf" ;;
+    --leader)   EXTRA="-DEXTRA_CONF_FILE=overlay-leader.conf" ;;
     --board)    shift; BOARD="$1" ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
@@ -51,12 +52,15 @@ UF2="build/swarm_node/zephyr/zephyr.uf2"
 echo ">>> Build complete: $UF2"
 
 if [ "$DO_FLASH" -eq 1 ]; then
-  DRIVE="$(ls -d /Volumes/XIAO* 2>/dev/null | head -1 || true)"
+  # Bootloader mass-storage mount: macOS /Volumes, Linux /media|/run/media|/mnt.
+  DRIVE="$(ls -d /Volumes/XIAO* /media/"$USER"/XIAO* /run/media/"$USER"/XIAO* \
+              /media/XIAO* /mnt/XIAO* 2>/dev/null | head -1 || true)"
   if [ -z "$DRIVE" ]; then
     echo "!!! No XIAO drive mounted. Double-tap RESET, then re-run with --flash." >&2
     exit 1
   fi
   echo ">>> Flashing to $DRIVE"
   cp "$UF2" "$DRIVE/"
+  sync
   echo ">>> Done. The board will reboot."
 fi

@@ -86,6 +86,77 @@ anchors are multilaterated (least squares), fused with IMU dead-reckoning. The
 nRF52840 cannot measure true time-of-flight, so ranges are coarse (meters–tens of
 meters) and surfaced as a position quality.
 
+### System hierarchy
+
+Three levels, one mesh. Each vehicle decides for **itself** (decentralized) unless
+the leader sends an override; passive nodes only ever transmit. The nRF is the
+sensor + radio front-end; the Jetson is the brain.
+
+```
+                       LEVEL 3 — COMMAND / BASE STATION   (one leader)
+     ┌─────────────────────────────────────────────────────────────────────┐
+     │  operator browser ──► Olympus dashboard (React/Cesium)  :3000         │
+     │        ▲ map / telemetry              │ click-to-command              │
+     │        │                              ▼                               │
+     │   Zenoh router ◄──── swarm-link ────► vehicle-api                     │
+     │                       │  registry · localize · autorouter ·          │
+     │                       │  command-translate (Olympus cmd → swarm)      │
+     │                       ▼  USB-CDC  (swarm_proto, COBS+CRC)             │
+     │                  LEADER nRF   (GPS+IMU + EKF, SWARM_FLAG_LEADER)      │
+     └───────────────────────────┬─────────────────────────────────────────┘
+                                  │
+        OpenThread 802.15.4 mesh — swarm_proto over CoAP, multicast ff03::1
+              ┌───────────────────┴───────────────────────┐
+              ▼                                            ▼
+ LEVEL 2 — ACTIVE VEHICLE  (member, ×N)         LEVEL 1 — PASSIVE NODE  (×M)
+ ┌──────────────────────────────────────┐      ┌──────────────────────────────┐
+ │ GPS + IMU ─► nRF (swarm_node)         │      │ GPS/IMU ─► nRF (beacon)       │
+ │              │ on-board EKF (fix)     │      │ caps: PASSIVE_RX | BEACON_TX  │
+ │     serial ▲ │ ▼ POSE_INJECT          │      │ transmits telemetry only;     │
+ │     (USB)  │ ▼                        │      │ command gate refuses actions  │
+ │ Jetson (the brain)                    │      └──────────────────────────────┘
+ │  • EKF: nRF fix + VIO + peers (≤50 m) │
+ │  • mission FSM: explore/search/goto/… │
+ │  • coordination: Voronoi + ORCA       │
+ │  • perception: YOLO (separate proc)   │
+ │  • override ◄ leader  (if OVERRIDABLE) │
+ │ caps: AUTONOMOUS | OVERRIDABLE         │
+ └──────────────────────────────────────┘
+```
+
+**Who decides what**
+
+| Level | Node | Decides | Commandable? |
+|---|---|---|---|
+| 3 | Leader / base station | issues fleet goals + overrides; hosts the GUI | — (it is the commander) |
+| 2 | Active vehicle | its own mission + collision avoidance, on its Jetson | yes if `OVERRIDABLE` — a leader override preempts the local policy; **EMERGENCY** (imminent collision) outranks even the override |
+| 1 | Passive node | nothing — transmits GPS/IMU/sensors only | no (`PASSIVE_RX`/`BEACON_TX`; the on-node gate drops action commands) |
+
+### Leader node vs member node — step by step
+
+A unit is "leader" or "member" by **which firmware you flash** and **which software
+the host runs**. Same hardware, two recipes — there is no runtime switch (the leader
+flag and mesh bridging are compiled in).
+
+**Leader / command module** (one per swarm)
+1. Flash its nRF as leader: `cd swarm_node && ./build.sh --leader`, double-tap RESET, then `./build.sh --leader --flash`.
+2. Plug that nRF's USB into the command computer (your laptop, or a Jetson).
+3. Start the command stack: `./run-command-station.sh` (Zenoh + vehicle-api + dashboard + swarm-link).
+4. Open the GUI at `http://localhost:3000` (or `http://<host-ip>:3000` from another machine). The leader shows up as a fleet anchor (it carries GPS+IMU) and is the only node allowed to issue overrides.
+
+**Member / active vehicle** (many)
+1. Flash its nRF as a plain node: `cd swarm_node && ./build.sh`, then `./build.sh --flash`.
+2. Plug that nRF's USB into the vehicle's Jetson.
+3. Run the agent on the Jetson:
+   ```bash
+   python3 -m jetson_agent --port /dev/ttyACM1 --prefix ceres \
+     --vehicle-api http://<leader-ip>:3001 --zenoh-rest http://<leader-ip>:8000
+   ```
+   It runs its own EKF + mission + avoidance and obeys leader overrides (vehicle mounts default to `AUTONOMOUS|OVERRIDABLE`).
+
+**Passive node** (beacon / external provider)
+- Flash a plain node built passive (`CONFIG_SWARM_CAP_PASSIVE_RX=y`, no `OVERRIDABLE`/`AUTONOMOUS`). It transmits telemetry and the command gate refuses to command it. No Jetson needed.
+
 ### The swarm protocol: current vs upgraded
 
 The stock firmware was a button-driven 1-byte `PUT /light` plus a one-shot

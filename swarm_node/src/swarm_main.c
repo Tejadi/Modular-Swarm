@@ -105,6 +105,13 @@ static void init_identity(void)
 	g_node.mount = IS_ENABLED(CONFIG_SWARM_MOUNT_VEHICLE)
 			? SWARM_MOUNT_VEHICLE : SWARM_MOUNT_STANDALONE;
 
+	g_node.capabilities = 0;
+	if (IS_ENABLED(CONFIG_SWARM_CAP_AUTONOMOUS)) g_node.capabilities |= SWARM_CAP_AUTONOMOUS;
+	if (IS_ENABLED(CONFIG_SWARM_CAP_OVERRIDABLE)) g_node.capabilities |= SWARM_CAP_OVERRIDABLE;
+	if (IS_ENABLED(CONFIG_SWARM_CAP_PASSIVE_RX)) g_node.capabilities |= SWARM_CAP_PASSIVE_RX;
+	if (IS_ENABLED(CONFIG_SWARM_CAP_BEACON_TX)) g_node.capabilities |= SWARM_CAP_BEACON_TX;
+	if (IS_ENABLED(CONFIG_SWARM_CAP_RELAY_ONLY)) g_node.capabilities |= SWARM_CAP_RELAY_ONLY;
+
 	strncpy(g_node.name, CONFIG_SWARM_NODE_NAME, sizeof(g_node.name) - 1);
 	g_node.name_len = strlen(g_node.name);
 
@@ -156,9 +163,9 @@ int main(void)
 	k_timer_init(&tlm_timer, tlm_timer_fn, NULL);
 	k_timer_init(&nbr_timer, nbr_timer_fn, NULL);
 
-	/* The gateway is infrastructure, not a swarm member: it only reports the
-	 * neighbors it hears (tree roots) and bridges the rest over serial. */
-	if (!IS_ENABLED(CONFIG_SWARM_GATEWAY)) {
+	/* Plain nodes AND the leader announce + stream telemetry (the leader is a
+	 * fleet position anchor); a pure gateway is infrastructure and does not. */
+	if (!IS_ENABLED(CONFIG_SWARM_GATEWAY) || IS_ENABLED(CONFIG_SWARM_LEADER)) {
 		k_timer_start(&hello_timer, K_MSEC(500), K_MSEC(SWARM_HELLO_PERIOD_MS));
 		k_timer_start(&tlm_timer, K_MSEC(1000), K_MSEC(SWARM_TLM_PERIOD_MS));
 	}

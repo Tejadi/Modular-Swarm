@@ -36,8 +36,12 @@ URI_NEIGHBORS = "swm/nbr"
 URI_RANGE = "swm/rng"
 URI_ROUTE = "swm/rte"
 URI_CMD = "swm/cmd"
+URI_BROADCAST = "swm/bc"
 
 EUI64_NONE = b"\xff" * EUI64_LEN
+
+# A Jetson POSE_INJECT is treated as authoritative only while this fresh (ms).
+POSE_FRESH_MS = 2000
 
 
 class MsgType(IntEnum):
@@ -46,14 +50,19 @@ class MsgType(IntEnum):
     NEIGHBORS = 0x03
     RANGE_REQ = 0x04
     RANGE_RESP = 0x05
+    POSE_INJECT = 0x06  # Jetson -> nRF (serial): authoritative fused pose
+    MESH_SEND = 0x07    # Jetson -> nRF (serial): opaque frame to relay
     ROUTE = 0x10
     CMD = 0x11
+    BROADCAST = 0x12    # leader -> all (multicast): command / override
 
 
 class Flags(IntFlag):
     NONE = 0
     GATEWAY = 1 << 0
     RELAYED = 1 << 1
+    LEADER = 1 << 2     # sender is the base-station leader
+    OVERRIDE = 1 << 3   # command overrides decentralized policy
 
 
 class Role(IntFlag):
@@ -78,6 +87,7 @@ class Sensor(IntFlag):
     HUMIDITY = 1 << 5
     RANGEFINDER = 1 << 6
     CAMERA = 1 << 7
+    VIO = 1 << 8       # Jetson visual-inertial odometry present
 
 
 class PosSource(IntEnum):
@@ -109,6 +119,13 @@ class Channel(IntEnum):
     GYRO_X = 0x13
     GYRO_Y = 0x14
     GYRO_Z = 0x15
+    VEL_N = 0x16
+    VEL_E = 0x17
+    VEL_D = 0x18
+    POS_VAR = 0x19
+    VEL_VAR = 0x1A
+    HDG_VAR = 0x1B
+    MAG_HDG = 0x1C
     RANGEFINDER = 0x20
     BATTERY_V = 0x30
 
@@ -121,6 +138,39 @@ class CmdOp(IntEnum):
     REBOOT = 4
     LIGHT = 5
     SET_MOUNT = 6
+    SET_WAYPOINT = 7
+    SET_MISSION = 8
+    OVERRIDE = 9
+    CLEAR_OVERRIDE = 10
+    SET_PERMISSIONS = 11
+
+
+class MissionType(IntEnum):
+    EXPLORE = 0
+    SEARCH = 1
+    COVERAGE = 2
+    PATROL = 3
+    GOTO = 4
+    LOITER = 5
+    RTL = 6
+
+
+class Capability(IntFlag):
+    NONE = 0
+    OVERRIDABLE = 1 << 0   # leader may override this node
+    AUTONOMOUS = 1 << 1    # runs decentralized mission policy
+    PASSIVE_RX = 1 << 2    # receive-only swarm member
+    BEACON_TX = 1 << 3     # passive beacon / waypoint station
+    RELAY_ONLY = 1 << 4    # forwards traffic only
+
+
+class EkfFlag(IntFlag):
+    NONE = 0
+    GPS_USED = 1 << 0
+    IMU_USED = 1 << 1
+    VIO_USED = 1 << 2      # a Jetson POSE_INJECT was adopted
+    PEER_USED = 1 << 3
+    CONVERGED = 1 << 4
 
 
 # Human-readable names for the dashboard sensor manifest.
@@ -133,12 +183,27 @@ SENSOR_NAMES = {
     Sensor.HUMIDITY: "humidity",
     Sensor.RANGEFINDER: "rangefinder",
     Sensor.CAMERA: "camera",
+    Sensor.VIO: "vio",
 }
 
 
 def sensor_list(bitmap: int) -> list[str]:
     """Expand a sensor bitmap into the manifest of present sensor names."""
     return [name for bit, name in SENSOR_NAMES.items() if bitmap & bit]
+
+
+CAPABILITY_NAMES = {
+    Capability.OVERRIDABLE: "overridable",
+    Capability.AUTONOMOUS: "autonomous",
+    Capability.PASSIVE_RX: "passive_rx",
+    Capability.BEACON_TX: "beacon_tx",
+    Capability.RELAY_ONLY: "relay_only",
+}
+
+
+def capability_list(bitmap: int) -> list[str]:
+    """Expand a capability bitmask into permission names for the dashboard."""
+    return [name for bit, name in CAPABILITY_NAMES.items() if bitmap & bit]
 
 
 def eui_str(eui: bytes) -> str:
@@ -281,7 +346,9 @@ class Header:
         magic, ver, mtype, flags, eui, seq = struct.unpack("<BBBB8sI", data[:HDR_LEN])
         if magic != MAGIC:
             raise ValueError(f"bad magic 0x{magic:02x}")
-        if ver != VERSION:
+        # Append-only forward compatibility: accept this version and older. A
+        # newer field is always a trailer an older decoder simply ignores.
+        if ver > VERSION:
             raise ValueError(f"unsupported version {ver}")
         return cls(msg_type=mtype, eui=eui, seq=seq, flags=flags)
 
@@ -309,6 +376,7 @@ class Hello:
     uptime_s: int = 0
     name: str = ""
     attached_to: str = ""
+    capabilities: int = 0   # enum Capability bitmask (trailer)
     seq: int = 0
     flags: int = 0
 
@@ -317,6 +385,7 @@ class Hello:
                            self.fw_version, self.battery_pct, self.uptime_s)
         body += _pack_str(self.name, 24)
         body += _pack_str(self.attached_to, 32)
+        body += struct.pack("<H", self.capabilities)
         return Header(MsgType.HELLO, self.eui, self.seq, self.flags).pack() + body
 
     @classmethod
@@ -325,15 +394,25 @@ class Hello:
         off = 11
         name, off = _read_str(body, off)
         attached, off = _read_str(body, off)
+        # Capabilities trailer is optional (older firmware omits it).
+        caps = 0
+        if off + 2 <= len(body):
+            (caps,) = struct.unpack("<H", body[off:off + 2])
+            off += 2
         return cls(eui=hdr.eui, role=role, mount=mount, sensors=sensors,
                    fw_version=fw, battery_pct=batt, uptime_s=uptime,
-                   name=name, attached_to=attached, seq=hdr.seq, flags=hdr.flags)
+                   name=name, attached_to=attached, capabilities=caps,
+                   seq=hdr.seq, flags=hdr.flags)
 
 
 @dataclass
 class Reading:
     channel: int
     value: float
+
+
+def _clamp(v: int, lo: int, hi: int) -> int:
+    return lo if v < lo else hi if v > hi else v
 
 
 @dataclass
@@ -348,6 +427,13 @@ class Telemetry:
     battery_pct: int = 100
     pos_quality: int = 0      # 0..255 (255 best)
     readings: list[Reading] = field(default_factory=list)
+    # Fused-kinematics trailer (EKF output). Present iff has_kinematics.
+    has_kinematics: bool = False
+    vel_n: float = 0.0        # m/s, north
+    vel_e: float = 0.0        # m/s, east
+    pos_std: float = 0.0      # m, 1-sigma horizontal position std
+    hdg_std: float = 0.0      # deg, 1-sigma heading std
+    ekf_flags: int = 0        # enum EkfFlag
     seq: int = 0
     flags: int = 0
 
@@ -362,6 +448,14 @@ class Telemetry:
         body += bytes([len(self.readings)])
         for r in self.readings:
             body += struct.pack("<Bf", r.channel, r.value)
+        if self.has_kinematics:
+            body += struct.pack(
+                "<hhHHB",
+                _clamp(int(round(self.vel_n * 100)), -32768, 32767),
+                _clamp(int(round(self.vel_e * 100)), -32768, 32767),
+                _clamp(int(round(self.pos_std * 100)), 0, 65535),
+                _clamp(int(round(self.hdg_std * 100)), 0, 65535),
+                self.ekf_flags & 0xFF)
         return Header(MsgType.TELEMETRY, self.eui, self.seq, self.flags).pack() + body
 
     @classmethod
@@ -375,10 +469,18 @@ class Telemetry:
             ch, val = struct.unpack("<Bf", body[off:off + 5])
             readings.append(Reading(ch, val))
             off += 5
+        # Optional fused-kinematics trailer (9 bytes: hhHHB).
+        kin = dict(has_kinematics=False, vel_n=0.0, vel_e=0.0,
+                   pos_std=0.0, hdg_std=0.0, ekf_flags=0)
+        if off + 9 <= len(body):
+            vn, ve, ps, hs, ef = struct.unpack("<hhHHB", body[off:off + 9])
+            kin = dict(has_kinematics=True, vel_n=vn / 100.0, vel_e=ve / 100.0,
+                       pos_std=ps / 100.0, hdg_std=hs / 100.0, ekf_flags=ef)
+            off += 9
         return cls(eui=hdr.eui, status=status, pos_source=src,
                    lat=lat_e7 / 1e7, lon=lon_e7 / 1e7, alt=alt_cm / 100.0,
                    heading=hdg / 100.0, battery_pct=batt, pos_quality=q,
-                   readings=readings, seq=hdr.seq, flags=hdr.flags)
+                   readings=readings, seq=hdr.seq, flags=hdr.flags, **kin)
 
 
 @dataclass
@@ -506,14 +608,127 @@ class Cmd:
         return cls(eui=hdr.eui, op=op, params=params, seq=hdr.seq, flags=hdr.flags)
 
 
+@dataclass
+class Broadcast:
+    """Leader -> all (multicast). Same op/params shape as Cmd."""
+    eui: bytes          # leader's eui
+    op: int = CmdOp.NOOP
+    params: bytes = b""
+    seq: int = 0
+    flags: int = 0
+
+    def encode(self) -> bytes:
+        body = bytes([self.op, len(self.params)]) + self.params
+        return Header(MsgType.BROADCAST, self.eui, self.seq, self.flags).pack() + body
+
+    @classmethod
+    def decode(cls, hdr: Header, body: bytes) -> "Broadcast":
+        op = body[0]
+        plen = body[1]
+        params = body[2:2 + plen]
+        return cls(eui=hdr.eui, op=op, params=params, seq=hdr.seq, flags=hdr.flags)
+
+
+@dataclass
+class PoseInject:
+    """Jetson -> nRF (serial): authoritative fused pose the nRF adopts+broadcasts."""
+    eui: bytes
+    lat: float = 0.0
+    lon: float = 0.0
+    alt: float = 0.0
+    heading: float = 0.0    # degrees
+    vel_n: float = 0.0      # m/s
+    vel_e: float = 0.0      # m/s
+    pos_std: float = 0.0    # m
+    hdg_std: float = 0.0    # deg
+    src_flags: int = 0      # enum EkfFlag
+    ts_ms: int = 0
+    seq: int = 0
+    flags: int = 0
+
+    def encode(self) -> bytes:
+        body = struct.pack(
+            "<iiiHhhHHBI",
+            int(round(self.lat * 1e7)), int(round(self.lon * 1e7)),
+            int(round(self.alt * 100)), int(round(self.heading * 100)) % 36000,
+            _clamp(int(round(self.vel_n * 100)), -32768, 32767),
+            _clamp(int(round(self.vel_e * 100)), -32768, 32767),
+            _clamp(int(round(self.pos_std * 100)), 0, 65535),
+            _clamp(int(round(self.hdg_std * 100)), 0, 65535),
+            self.src_flags & 0xFF, self.ts_ms & 0xFFFFFFFF)
+        return Header(MsgType.POSE_INJECT, self.eui, self.seq, self.flags).pack() + body
+
+    @classmethod
+    def decode(cls, hdr: Header, body: bytes) -> "PoseInject":
+        (lat_e7, lon_e7, alt_cm, hdg, vn, ve, ps, hs, sf, ts) = struct.unpack(
+            "<iiiHhhHHBI", body[:27])
+        return cls(eui=hdr.eui, lat=lat_e7 / 1e7, lon=lon_e7 / 1e7,
+                   alt=alt_cm / 100.0, heading=hdg / 100.0,
+                   vel_n=vn / 100.0, vel_e=ve / 100.0, pos_std=ps / 100.0,
+                   hdg_std=hs / 100.0, src_flags=sf, ts_ms=ts,
+                   seq=hdr.seq, flags=hdr.flags)
+
+
+@dataclass
+class MeshSend:
+    """Jetson -> nRF (serial): an opaque swarm frame the nRF relays onto the mesh."""
+    eui: bytes
+    payload: bytes = b""    # a complete swarm_proto frame (header+body)
+    seq: int = 0
+    flags: int = 0
+
+    def encode(self) -> bytes:
+        return Header(MsgType.MESH_SEND, self.eui, self.seq, self.flags).pack() + self.payload
+
+    @classmethod
+    def decode(cls, hdr: Header, body: bytes) -> "MeshSend":
+        return cls(eui=hdr.eui, payload=bytes(body), seq=hdr.seq, flags=hdr.flags)
+
+
+# --- Command param codecs (SET_WAYPOINT / OVERRIDE / SET_MISSION / SET_PERMISSIONS) ---
+
+def pack_waypoint(lat: float, lon: float, alt: float,
+                  mission_type: int = MissionType.GOTO,
+                  priority: int = 0, ttl_s: int = 0) -> bytes:
+    return struct.pack("<iiiBBH", int(round(lat * 1e7)), int(round(lon * 1e7)),
+                       int(round(alt * 100)), mission_type & 0xFF,
+                       priority & 0xFF, ttl_s & 0xFFFF)
+
+
+def unpack_waypoint(params: bytes) -> dict:
+    lat_e7, lon_e7, alt_cm, mt, pr, ttl = struct.unpack("<iiiBBH", params[:16])
+    return dict(lat=lat_e7 / 1e7, lon=lon_e7 / 1e7, alt=alt_cm / 100.0,
+                mission_type=mt, priority=pr, ttl_s=ttl)
+
+
+def pack_mission(mission_type: int, ttl_s: int = 0) -> bytes:
+    return struct.pack("<BH", mission_type & 0xFF, ttl_s & 0xFFFF)
+
+
+def unpack_mission(params: bytes) -> dict:
+    mt, ttl = struct.unpack("<BH", params[:3])
+    return dict(mission_type=mt, ttl_s=ttl)
+
+
+def pack_permissions(capabilities: int) -> bytes:
+    return struct.pack("<H", capabilities & 0xFFFF)
+
+
+def unpack_permissions(params: bytes) -> int:
+    return struct.unpack("<H", params[:2])[0]
+
+
 _DECODERS = {
     MsgType.HELLO: Hello.decode,
     MsgType.TELEMETRY: Telemetry.decode,
     MsgType.NEIGHBORS: Neighbors.decode,
     MsgType.RANGE_REQ: RangeReq.decode,
     MsgType.RANGE_RESP: RangeResp.decode,
+    MsgType.POSE_INJECT: PoseInject.decode,
+    MsgType.MESH_SEND: MeshSend.decode,
     MsgType.ROUTE: Route.decode,
     MsgType.CMD: Cmd.decode,
+    MsgType.BROADCAST: Broadcast.decode,
 }
 
 
