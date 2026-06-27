@@ -88,6 +88,12 @@ class NrfLink:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
+        # Per-session stall detection.
+        self._acked = False
+        self._acked_at = 0.0
+        self._last_data = 0.0
+        self._last_wait_log = 0.0
+
     # --- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
@@ -130,10 +136,14 @@ class NrfLink:
         # Opening the port asserts DTR -> the firmware (re)announces its manifest.
         self._ser = serial.Serial(self.port, self.baud, timeout=1)
         self._ser.dtr = True
+        self._acked = False
+        self._last_data = 0.0
+        self._last_wait_log = 0.0
         log.info("connected to %s; waiting for manifest", self.port)
 
         while not self._stop.is_set():
             raw = self._ser.readline()
+            self._watchdog()
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace").strip()
@@ -175,12 +185,42 @@ class NrfLink:
         if sid is None:
             return
         self.latest[sid] = value
-        log.debug("data %s ts=%s %s", sid, frame.get("ts_ms"), value)
+        self._last_data = time.monotonic()
         if self._on_data:
             try:
                 self._on_data(sid, value, frame)
             except Exception:
                 log.exception("on_data callback failed")
+        else:
+            # No consumer attached (e.g. standalone run): show the live state at
+            # INFO so polling/"waiting for fix" is visible without -v.
+            self._log_sample(sid, value)
+
+    @staticmethod
+    def _log_sample(sid: str, value: dict) -> None:
+        # GPS-style payloads get a human-readable line; anything else is dumped.
+        if "fix" in value and "lat" in value:
+            if value.get("fix", 0) > 0:
+                log.info("%s fix: lat=%.7f lon=%.7f sats=%s alt=%sm hdop=%s",
+                         sid, value.get("lat", 0.0), value.get("lon", 0.0),
+                         value.get("sats"), value.get("alt_m"), value.get("hdop"))
+            else:
+                log.info("%s: waiting for GPS fix (sats=%s)",
+                         sid, value.get("sats", 0))
+        else:
+            log.info("%s: %s", sid, value)
+
+    def _watchdog(self) -> None:
+        """After ACK, warn (throttled) if no data frames are arriving at all."""
+        if not self._acked or self._last_data:
+            return
+        now = time.monotonic()
+        if now - self._acked_at >= 3.0 and now - self._last_wait_log >= 5.0:
+            self._last_wait_log = now
+            log.warning("ACKed but no data frames yet from %s. If this persists, "
+                        "the board may be running firmware that only streams once "
+                        "it has a GPS fix — reflash the latest coap_server build.",
+                        self.node)
 
     def _send_ack(self, manifest: dict) -> None:
         # protocol.h: the firmware accepts any object containing "ack"; we send
@@ -192,6 +232,8 @@ class NrfLink:
         }
         self._ser.write((json.dumps(ack) + "\n").encode("utf-8"))
         self._ser.flush()
+        self._acked = True
+        self._acked_at = time.monotonic()
         log.info("-> ACK schema=%s node=%s", ack["schema"], ack["node"])
 
 

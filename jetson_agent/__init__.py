@@ -6,6 +6,13 @@ Two transports live here:
   - nrf_link.NrfLink  — the newline-delimited JSON link (coap_server firmware).
 """
 
-from .nrf_link import NrfLink
-
+# Lazy export so `python -m jetson_agent.nrf_link` doesn't import nrf_link twice
+# (which triggers a runpy RuntimeWarning).
 __all__ = ["NrfLink"]
+
+
+def __getattr__(name):
+    if name == "NrfLink":
+        from .nrf_link import NrfLink
+        return NrfLink
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
