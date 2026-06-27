@@ -3,9 +3,10 @@
 # Build the OpenThread CoAP server sample for the Seeed XIAO nRF52840
 # using the nRF Connect SDK toolchain installed by the VS Code extension.
 #
-# Console/shell/log are routed to USB CDC ACM via boards/xiao_ble.overlay
-# and boards/xiao_ble.conf (auto-applied for board xiao_ble) -- open the
-# board's USB serial port after flashing to see boot + Thread output.
+# The USB CDC ACM port is the Jetson JSON data link (newline-delimited JSON).
+# Console / shell / logs are on SEGGER RTT (see prj.conf) -- attach an SWD probe
+# and use JLinkRTTViewer to see boot + Thread output. boards/xiao_ble.overlay
+# (auto-applied for board xiao_ble) adds the GPS UART + data-link chosen nodes.
 #
 # Usage:
 #   ./build.sh                 # incremental build for xiao_ble

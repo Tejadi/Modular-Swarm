@@ -1,0 +1,43 @@
+/*
+ * Seeed XIAO nRF52840 (non-Sense) — coap_server peripheral overlay.
+ *
+ * MINIMAL by design. It builds on the board's native xiao_ble devicetree and
+ * deliberately does NOT redefine, duplicate, or override the board's built-in
+ * USB / console / CDC-ACM nodes (see the board's
+ * boards/common/usb/cdc_acm_serial.dtsi, which already provides
+ * `board_cdc_acm_uart` and the zephyr,console / zephyr,shell-uart choices).
+ * Routing the console off that port is handled purely in Kconfig (prj.conf),
+ * not here, to avoid the overlay-vs-native conflicts that bit us before.
+ *
+ * This overlay only:
+ *   1. Retunes the board's single hardware UART (uart0, already pinned to
+ *      D6 = P1.11 TX / D7 = P1.12 RX) to the Adafruit Ultimate GPS default of
+ *      9600 8N1, and
+ *   2. Adds two `chosen` pointers so firmware finds the GPS UART and the
+ *      (board-provided) CDC-ACM upstream data port without hard-coding labels.
+ *
+ * Adafruit Ultimate GPS Breakout v3 wiring (3.3V):
+ *   GPS VIN -> 3V3
+ *   GPS GND -> GND
+ *   GPS TX  -> XIAO D7 (P1.12, nRF RX)
+ *   GPS RX  -> XIAO D6 (P1.11, nRF TX)
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+&uart0 {
+	/* The MTK3339 boots at 9600 8N1. 8N1 (no parity, 1 stop bit) is the
+	 * nordic,nrf-uarte default, so only the baud rate needs overriding.
+	 * Firmware may raise this to 57600 at runtime (CONFIG_APP_GPS_HIGH_RATE). */
+	current-speed = <9600>;
+};
+
+/ {
+	chosen {
+		/* GPS NMEA UART (the board's hardware UART on D6/D7). */
+		swarm,gps-uart = &uart0;
+		/* Upstream JSON data link to the Jetson — the board's own CDC-ACM
+		 * instance, referenced (not redefined) so we don't fork its config. */
+		swarm,jetson-link = &board_cdc_acm_uart;
+	};
+};

@@ -4,6 +4,19 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
+menu "Swarm node options"
+
+config APP_GPS_HIGH_RATE
+	bool "Reconfigure GPS to 57600 baud @ 5 Hz at boot"
+	default n
+	help
+	  After the initial 9600 8N1 bring-up, push PMTK251 (57600 baud) and
+	  PMTK220 (200 ms = 5 Hz) to the GPS module and switch the UART to 57600.
+	  Leave disabled to stay at the Adafruit Ultimate GPS default of
+	  9600 8N1 / 1 Hz.
+
+endmenu
+
 menu "Zephyr Kernel"
 source "Kconfig.zephyr"
 endmenu

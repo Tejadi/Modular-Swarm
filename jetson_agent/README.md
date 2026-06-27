@@ -33,3 +33,43 @@ SWARM_JETSON_GPS=gpsd python -m jetson_agent --port /dev/ttyACM1 --prefix ceres
 Stdlib only. Reuses `olympus_link`'s model + Olympus client and `proto/`'s
 codec (both in this repo). GPS is read from `gpsd` over its TCP JSON protocol
 when `SWARM_JETSON_GPS=gpsd`; otherwise no Jetson sensors are assumed.
+
+---
+
+## JSON link (`coap_server` firmware): `nrf_link.py`
+
+The `agent.py` path above speaks the **binary** `swarm_proto` codec used by the
+`swarm_node` gateway firmware. The `coap_server` firmware instead exposes a
+**single** USB-CDC port carrying **newline-delimited JSON** (its shell is on RTT,
+not USB). `nrf_link.NrfLink` is the consumer for that firmware — the production
+counterpart to the bench script `jetson_mimic.py`.
+
+It implements the capability-discovery handshake from
+`coap_server/src/protocol.h`: opening the port asserts DTR → the firmware
+announces a `manifest` → we reply with an `ack` → the firmware streams `data`
+frames. It re-ACKs on every reconnect and caches the latest value per sensor.
+
+```bash
+# nRF board is on /dev/ttyACM0 (single CDC port; shell lives on RTT)
+python -m jetson_agent.nrf_link                  # defaults to /dev/ttyACM0
+python -m jetson_agent.nrf_link /dev/ttyACM0 -v  # also log streamed data frames
+
+# override the default port via the environment (shared with the rest of the pkg)
+SWARM_NRF_PORT=/dev/ttyACM0 python -m jetson_agent.nrf_link
+```
+
+Embed it in a larger runtime via callbacks:
+
+```python
+from jetson_agent import NrfLink
+
+def on_data(sensor_id, value, frame):
+    if sensor_id == "gps0" and value.get("fix", 0) > 0:
+        print(value["lat"], value["lon"])
+
+link = NrfLink("/dev/ttyACM0", on_data=on_data)
+link.start()        # background thread, auto-reconnects
+# link.latest["gps0"] holds the most recent fix; link.stop() to shut down
+```
+
+Requires `pyserial` (`pip install pyserial`).

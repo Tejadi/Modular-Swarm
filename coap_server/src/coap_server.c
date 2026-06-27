@@ -11,6 +11,8 @@
 #include <openthread/thread.h>
 
 #include "ot_coap_utils.h"
+#include "gps.h"
+#include "jetson_link.h"
 
 LOG_MODULE_REGISTER(coap_server, CONFIG_COAP_SERVER_LOG_LEVEL);
 
@@ -165,6 +167,12 @@ int main(void)
 		LOG_ERR("Cannot init buttons (error: %d)", ret);
 		goto end;
 	}
+
+	/* Sensor stack: register each sensor's descriptor with the registry, then
+	 * bring up the upstream Jetson link. The link reads the registry at
+	 * handshake time, so init order only needs sensors before the link. */
+	gps_init();
+	jetson_link_init();
 
 	openthread_state_changed_callback_register(&ot_state_chaged_cb);
 	openthread_run();
