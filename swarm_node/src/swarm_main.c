@@ -48,11 +48,11 @@ static struct k_timer nbr_timer;
 
 static void with_ot_lock(void (*fn)(void))
 {
-	struct openthread_context *ctx = openthread_get_default_context();
-
-	openthread_api_mutex_lock(ctx);
+	/* The periodic senders run on the swarm work queue, off the OpenThread
+	 * thread, so guard the OT API with its mutex (NCS v3.3.1 module API). */
+	openthread_mutex_lock();
 	fn();
-	openthread_api_mutex_unlock(ctx);
+	openthread_mutex_unlock();
 }
 
 static void hello_work_fn(struct k_work *w) { ARG_UNUSED(w); with_ot_lock(swarm_coap_send_hello); }

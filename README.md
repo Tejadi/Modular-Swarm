@@ -92,6 +92,13 @@ Three levels, one mesh. Each vehicle decides for **itself** (decentralized) unle
 the leader sends an override; passive nodes only ever transmit. The nRF is the
 sensor + radio front-end; the Jetson is the brain.
 
+Each module runs **two EKFs in series**. **EKF #1** on the nRF fuses GPS + IMU into
+a fused pose. **EKF #2** on the Jetson takes that fused pose and — *only if it has
+more to work with* (a camera's VIO, and/or peer fixes within 50 m) — fuses those in
+for a better fix; with nothing extra it simply uses the nRF's pose as-is. When EKF #2
+does improve the fix, it injects the refined pose back to the nRF (`POSE_INJECT`) to
+broadcast on the mesh.
+
 ```
                        LEVEL 3 — COMMAND / BASE STATION   (one leader)
      ┌─────────────────────────────────────────────────────────────────────┐
@@ -108,20 +115,24 @@ sensor + radio front-end; the Jetson is the brain.
         OpenThread 802.15.4 mesh — swarm_proto over CoAP, multicast ff03::1
               ┌───────────────────┴───────────────────────┐
               ▼                                            ▼
- LEVEL 2 — ACTIVE VEHICLE  (member, ×N)         LEVEL 1 — PASSIVE NODE  (×M)
- ┌──────────────────────────────────────┐      ┌──────────────────────────────┐
- │ GPS + IMU ─► nRF (swarm_node)         │      │ GPS/IMU ─► nRF (beacon)       │
- │              │ on-board EKF (fix)     │      │ caps: PASSIVE_RX | BEACON_TX  │
- │     serial ▲ │ ▼ POSE_INJECT          │      │ transmits telemetry only;     │
- │     (USB)  │ ▼                        │      │ command gate refuses actions  │
- │ Jetson (the brain)                    │      └──────────────────────────────┘
- │  • EKF: nRF fix + VIO + peers (≤50 m) │
- │  • mission FSM: explore/search/goto/… │
- │  • coordination: Voronoi + ORCA       │
- │  • perception: YOLO (separate proc)   │
- │  • override ◄ leader  (if OVERRIDABLE) │
- │ caps: AUTONOMOUS | OVERRIDABLE         │
- └──────────────────────────────────────┘
+ LEVEL 2 — ACTIVE VEHICLE  (member, ×N)            LEVEL 1 — PASSIVE NODE (×M)
+ ┌─────────────────────────────────────────────┐  ┌──────────────────────────────┐
+ │ GPS ┐                                        │  │ GPS/IMU ─► nRF (beacon)       │
+ │ IMU ┴─► nRF · EKF #1  (GPS + IMU fusion)      │  │ caps: PASSIVE_RX | BEACON_TX  │
+ │              │ fused pose                     │  │ transmits telemetry only;     │
+ │  POSE_INJECT ▲│▼ serial (USB-CDC)             │  │ command gate refuses actions  │
+ │ Jetson · EKF #2  (fuse / refine):            │  └──────────────────────────────┘
+ │   in  = nRF fused pose                        │
+ │       + camera VIO        (only if a camera)  │
+ │       + peer fixes ≤50 m  (only if in range)  │
+ │   out: no extras  → uses the nRF pose as-is   │
+ │        has extras → refined pose ─► INJECT    │
+ │ • mission FSM (explore/search/goto/RTL)       │
+ │ • coordination: Voronoi coverage + ORCA       │
+ │ • perception: YOLO (separate process)         │
+ │ • override ◄ leader  (if OVERRIDABLE)         │
+ │ caps: AUTONOMOUS | OVERRIDABLE                │
+ └─────────────────────────────────────────────┘
 ```
 
 **Who decides what**

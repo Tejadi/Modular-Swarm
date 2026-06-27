@@ -3,5 +3,6 @@
         "${workspaceFolder}/coap_client",
         "${workspaceFolder}/coap_server",
         "${workspaceFolder}/shell_module"
-    ]
+    ],
+    "cmake.sourceDirectory": "/home/adigsram/Desktop/elaris/nRF-swarm/shell_module"
 }

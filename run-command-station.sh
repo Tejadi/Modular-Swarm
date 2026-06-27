@@ -3,7 +3,7 @@
 # Run THIS machine as the swarm COMMAND STATION (the "command module" host).
 #
 # It:
-#   - reads the attached LEADER nRF over USB-CDC (default /dev/ttyACM1, the data
+#   - reads the attached LEADER nRF over USB-CDC (default /dev/ttyACM0, the data
 #     port; /dev/ttyACM0 is the console),
 #   - brings up Olympus (zenoh-router, vehicle-api, dashboard) + the swarm-link
 #     bridge that feeds the mesh into Olympus,
@@ -16,13 +16,13 @@
 #   * your user is in the 'dialout' group (serial access): sudo usermod -aG dialout "$USER"
 #
 # Override the serial port / instance / full-stack via env:
-#   SWARM_SERIAL_PORT=/dev/ttyACM1 OLYMPUS_INSTANCE=ceres ./run-command-station.sh
+#   SWARM_SERIAL_PORT=/dev/ttyACM0 OLYMPUS_INSTANCE=ceres ./run-command-station.sh
 #   FULL=1 ./run-command-station.sh        # also start ollama + brain + advisor
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PORT="${SWARM_SERIAL_PORT:-/dev/ttyACM1}"
+PORT="${SWARM_SERIAL_PORT:-/dev/ttyACM0}"
 INSTANCE="${OLYMPUS_INSTANCE:-ceres}"
 COMPOSE="docker-compose.swarm.yml"
 

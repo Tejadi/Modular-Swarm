@@ -5,7 +5,7 @@
 # into Olympus. Run it on the computer the leader nRF is plugged into; open the
 # dashboard at http://<that-host>:3000.
 #
-#   SWARM_SERIAL_PORT=/dev/ttyACM1 docker compose -f docker-compose.swarm.yml up
+#   SWARM_SERIAL_PORT=/dev/ttyACM0 docker compose -f docker-compose.swarm.yml up
 #
 # `include` merges the Olympus compose so everything shares one network. Point it
 # at your Olympus checkout — ../olympus today, or olympus/ once it is a submodule
@@ -29,12 +29,12 @@ services:
       - SWARM_KEY_PREFIX=${OLYMPUS_INSTANCE:-ceres}
       - SWARM_VEHICLE_API=http://vehicle-api:3001
       - SWARM_VEHICLE_API_KEY=${OLYMPUS_API_KEY:-}
-      - SWARM_SERIAL_PORT=${SWARM_SERIAL_PORT:-/dev/ttyACM1}
+      - SWARM_SERIAL_PORT=${SWARM_SERIAL_PORT:-/dev/ttyACM0}
       - SWARM_STATION_LAT=${SWARM_STATION_LAT:-37.7749}
       - SWARM_STATION_LON=${SWARM_STATION_LON:--122.4194}
     # Map the gateway/leader nRF's data serial port into the container.
     devices:
-      - "${SWARM_SERIAL_PORT:-/dev/ttyACM1}:${SWARM_SERIAL_PORT:-/dev/ttyACM1}"
+      - "${SWARM_SERIAL_PORT:-/dev/ttyACM0}:${SWARM_SERIAL_PORT:-/dev/ttyACM0}"
     depends_on:
       - zenoh-router
       - vehicle-api

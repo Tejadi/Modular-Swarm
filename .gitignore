@@ -6,7 +6,7 @@ __pycache__/
 venv/
 
 # Zephyr / nRF build output
-build/
+build*/
 *.uf2
 
 # Editor / OS

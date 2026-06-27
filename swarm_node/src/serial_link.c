@@ -19,9 +19,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/ring_buffer.h>
-#include <zephyr/usb/usb_device.h>
 #include <zephyr/logging/log.h>
-#include <errno.h>
 #include <string.h>
 
 #include <swarm_protocol.h>
@@ -134,17 +132,12 @@ static void serial_isr(const struct device *dev, void *user_data)
 
 int serial_link_init(void)
 {
-	int ret;
-
 	if (!device_is_ready(ser)) {
 		LOG_WRN("serial data port not ready");
 		return -1;
 	}
-	/* Bring up USB if the board has not already (console build may have). */
-	ret = usb_enable(NULL);
-	if (ret && ret != -EALREADY) {
-		LOG_WRN("usb_enable failed: %d", ret);
-	}
+	/* The modern USB device_next stack enables the CDC at boot (board config),
+	 * so we don't call usb_enable() — just attach to the CDC-ACM UART. */
 	uart_irq_callback_user_data_set(ser, serial_isr, NULL);
 	uart_irq_rx_enable(ser);
 	LOG_INF("serial data link up on %s", ser->name);

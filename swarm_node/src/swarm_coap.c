@@ -17,6 +17,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <string.h>
 
+#include <zephyr/net/openthread.h>
 #include <openthread/coap.h>
 #include <openthread/thread.h>
 #include <openthread/message.h>

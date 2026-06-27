@@ -1,25 +1,19 @@
 /*
  * Seeed XIAO nRF52840 — swarm module wiring.
  *
- * USB enumerates TWO CDC-ACM functions: the console/shell on the board default,
- * and a SECOND function (cdc_acm_swarm) as the dedicated swarm data link to the
- * Jetson (node) or the Olympus host (gateway). The GPS rides the hardware UART
- * (uart0 on D6/D7) and the IMU the I2C bus (i2c0 on D4/D5), mirroring the proven
- * coap_server GPS wiring.
+ * The board's single USB CDC-ACM (board_cdc_acm_uart, modern device_next stack,
+ * auto-enabled at boot) is the swarm data link to the Jetson (node) or the
+ * Olympus host (gateway/leader); the console/shell/logs ride SEGGER RTT (see
+ * prj.conf), exactly like the proven coap_server. The GPS rides the hardware
+ * UART (uart0 on D6/D7) and the IMU the I2C bus (i2c1 on D4/D5).
  *
  * Hardware on this build:
- *   - IMU: Adafruit MPU-6050 6-DoF (STEMMA QT / I2C) @ 0x68 on i2c0 (D4/D5).
+ *   - IMU: Adafruit MPU-6050 6-DoF (STEMMA QT / I2C) @ 0x68 on i2c1 (D4/D5).
  *   - GPS: Adafruit Ultimate GPS Breakout v3 (NMEA) @ 9600 on uart0 (D6/D7).
  * Absent sensors leave their HELLO bit clear and the EKF runs with fewer inputs.
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
-
-&zephyr_udc0 {
-	cdc_acm_swarm: cdc_acm_swarm {
-		compatible = "zephyr,cdc-acm-uart";
-	};
-};
 
 /* GPS: Adafruit Ultimate GPS v3, NMEA over the hardware UART
  * (XIAO D7=RX/P1.12 <- GPS TX, D6=TX/P1.11 -> GPS RX). */
@@ -28,12 +22,12 @@
 	current-speed = <9600>;
 };
 
-/* IMU: Adafruit MPU-6050 over STEMMA QT / I2C0 (XIAO D4=SDA/P0.04, D5=SCL/P0.05).
- * AD0 low -> 0x68. The Zephyr invensense,mpu6050 driver reports accel in m/s^2
- * and gyro in rad/s, which is exactly what sensors.c / ekf.c expect. */
-&i2c0 {
-	status = "okay";
-	clock-frequency = <I2C_BITRATE_FAST>;   /* 400 kHz */
+/* IMU: Adafruit MPU-6050 over STEMMA QT / I2C. The XIAO's D4/D5 (STEMMA QT) pins
+ * are i2c1 (SDA=P0.04/D4, SCL=P0.05/D5), which the board already enables with
+ * pinctrl, so we just attach the device. AD0 low -> 0x68. The Zephyr
+ * invensense,mpu6050 driver reports accel in m/s^2 and gyro in rad/s — exactly
+ * what sensors.c / ekf.c expect. */
+&i2c1 {
 	mpu6050: mpu6050@68 {
 		compatible = "invensense,mpu6050";
 		reg = <0x68>;
@@ -43,7 +37,7 @@
 
 / {
 	chosen {
-		swarm,serial = &cdc_acm_swarm;
+		swarm,serial = &board_cdc_acm_uart;
 		swarm,imu = &mpu6050;
 		swarm,gps-uart = &uart0;
 	};
