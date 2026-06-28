@@ -200,6 +200,18 @@ void ekf_set_anchor(struct ekf_state *s, double lat, double lon)
 	s->P[IDX(EKF_PN, EKF_PN)] = 25.0f;
 	s->P[IDX(EKF_PE, EKF_PE)] = 25.0f;
 	s->anchored = true;
+	s->provisional = false;
+}
+
+void ekf_set_anchor_provisional(struct ekf_state *s, double lat, double lon)
+{
+	ekf_set_anchor(s, lat, lon);
+	s->provisional = true;
+	/* It's a placeholder, not a measurement: keep position uncertainty large
+	 * (~1 km) so the reported quality is honestly "rough" and the first real
+	 * GPS fix dominates. Velocity/heading carry on dead-reckoning from the IMU. */
+	s->P[IDX(EKF_PN, EKF_PN)] = 1.0e6f;
+	s->P[IDX(EKF_PE, EKF_PE)] = 1.0e6f;
 }
 
 void ekf_predict(struct ekf_state *s, const float accel_b[2], float gyro_z, float dt)
@@ -262,6 +274,13 @@ void ekf_update_gps_pos(struct ekf_state *s, double lat, double lon, float std_m
 		ekf_set_anchor(s, lat, lon);
 		return;
 	}
+	if (s->provisional) {
+		/* First real GPS fix after a placeholder anchor: snap the origin to
+		 * the true location (resets position to 0, drops provisional). The
+		 * IMU-derived velocity/heading carry over. */
+		ekf_set_anchor(s, lat, lon);
+		return;
+	}
 	float pN = (float)((lat - s->lat0) * MPD_LAT);
 	float pE = (float)((lon - s->lon0) * (double)s->mpd_lon);
 	float r = std_m * std_m;
@@ -282,6 +301,13 @@ void ekf_update_gps_vel(struct ekf_state *s, float speed_mps, float course_rad)
 		float psi_meas = atan2f(vN, vE); /* math yaw, CCW from East */
 		update1(s, EKF_PSI, psi_meas, R_GPS_HDG_DEG2 * DEG2RAD * DEG2RAD, true);
 	}
+}
+
+void ekf_update_heading(struct ekf_state *s, float heading_compass_rad, float std_rad)
+{
+	/* compass (CW from North) -> math yaw psi (CCW from East): psi = pi/2 - h. */
+	float psi_meas = wrap_pi(PI_F * 0.5f - heading_compass_rad);
+	update1(s, EKF_PSI, psi_meas, std_rad * std_rad, true);
 }
 
 void ekf_update_zupt(struct ekf_state *s)

@@ -36,6 +36,7 @@ static const struct device *const bus = DEVICE_DT_GET(DT_CHOSEN(swarm_imu_i2c));
 #define REG_GYR_DATA_X_LSB  0x14   /* 6 bytes: X,Y,Z int16 LE */
 #define REG_EUL_HEAD_LSB    0x1A   /* 2 bytes: heading int16 LE */
 #define REG_LIA_DATA_X_LSB  0x28   /* 6 bytes: X,Y,Z int16 LE */
+#define REG_CALIB_STAT      0x35   /* SYS[7:6] GYR[5:4] ACC[3:2] MAG[1:0] */
 #define REG_UNIT_SEL        0x3B
 #define REG_OPR_MODE        0x3D
 #define REG_PWR_MODE        0x3E
@@ -127,6 +128,8 @@ bool bno055_read(struct bno055_sample *s)
 	s->ax = s->ay = s->gyro_z = 0.0f;
 	s->heading_rad = 0.0f;
 	s->heading_valid = false;
+	s->mag_calib = 0;
+	s->sys_calib = 0;
 
 	/* linear acceleration (gravity removed), body X/Y */
 	if (i2c_burst_read(bus, dev_addr, REG_LIA_DATA_X_LSB, b, 6) != 0) {
@@ -141,10 +144,17 @@ bool bno055_read(struct bno055_sample *s)
 	}
 	s->gyro_z = (le16(&b[4]) / GYR_LSB_PER_DPS) * DEG2RAD;
 
-	/* absolute heading (Euler) — present once the magnetometer calibrates */
+	/* absolute heading (Euler) — trustworthy once the magnetometer calibrates */
 	if (i2c_burst_read(bus, dev_addr, REG_EUL_HEAD_LSB, b, 2) == 0) {
 		s->heading_rad = (le16(&b[0]) / EUL_LSB_PER_DEG) * DEG2RAD;
 		s->heading_valid = true;
+	}
+
+	/* calibration status: gate the heading update on a calibrated magnetometer */
+	uint8_t cal = 0;
+	if (i2c_reg_read_byte(bus, dev_addr, REG_CALIB_STAT, &cal) == 0) {
+		s->mag_calib = cal & 0x03;
+		s->sys_calib = (cal >> 6) & 0x03;
 	}
 	return true;
 #endif

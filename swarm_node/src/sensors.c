@@ -40,6 +40,21 @@ LOG_MODULE_REGISTER(swarm_sensors, CONFIG_SWARM_NODE_LOG_LEVEL);
 #define ZUPT_STILL_MS    500         /* stationary this long -> ZUPT */
 #define KNOTS_TO_MPS     0.514444f
 
+/* BNO055 absolute-heading update (leader / any BNO055 node). Rate-limited so the
+ * correlated samples don't make the filter over-confident, and gated on a
+ * calibrated magnetometer. MPU-6050 nodes never take this path — they keep
+ * heading from gyro integration + GPS course. */
+#define HDG_PERIOD_MS     200
+#define HDG_STD_RAD       0.08727f   /* ~5 deg 1-sigma */
+#define BNO_MAG_CALIB_MIN 2          /* 0..3; trust heading at >= this */
+
+/* No GPS lock? Anchor at a placeholder so the node still reports a position and
+ * dead-reckons from the IMU; the first real GPS fix re-anchors at the truth.
+ * Philadelphia City Hall. */
+#define GPS_WAIT_MS      8000        /* give GPS this long before the placeholder */
+#define PLACEHOLDER_LAT  39.9526
+#define PLACEHOLDER_LON  (-75.1652)
+
 /* --- optional devices, resolved from chosen{} when present --- */
 
 #if DT_HAS_CHOSEN(swarm_imu)
@@ -82,6 +97,7 @@ static struct ekf_state ekf;
 static int32_t last_alt_cm;          /* altitude rides outside the EKF (GPS GGA) */
 static int64_t last_gps_ms;
 static int64_t still_since_ms;        /* monotonic time the unit went stationary */
+static int64_t last_hdg_ms;           /* last BNO055 absolute-heading update */
 
 /* Cached fused fix + a Jetson-injected pose; read by swarm_sensors_read(). */
 static struct k_spinlock fix_lock;
@@ -229,30 +245,47 @@ static void handle_nmea(char *line)
 
 /* --- IMU prediction step --- */
 
-/* Read body horizontal accel + yaw rate from whichever IMU auto-detect found.
- * Body x=forward, y=left (identity mounting; calibrate a static R_sb later). */
-static bool imu_read_body(float a_body[2], float *gyro_z)
+/* One IMU read, normalised for the EKF. Body x=forward, y=left (identity
+ * mounting; calibrate a static R_sb later). has_abs_heading is set only by a
+ * BNO055 with a calibrated magnetometer. */
+struct imu_reading {
+	float a_body[2];
+	float gyro_z;
+	bool  has_abs_heading;
+	float heading_rad;     /* compass heading, CW from North */
+};
+
+static bool imu_read(struct imu_reading *r)
 {
+	r->a_body[0] = r->a_body[1] = r->gyro_z = 0.0f;
+	r->has_abs_heading = false;
+	r->heading_rad = 0.0f;
+
 	if (imu_backend == IMU_MPU6050) {
 		struct sensor_value accel[3], gyro[3];
 
 		if (sensor_sample_fetch(imu_dev) == 0 &&
 		    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, accel) == 0 &&
 		    sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro) == 0) {
-			a_body[0] = sensor_value_to_float(&accel[0]);
-			a_body[1] = sensor_value_to_float(&accel[1]);
-			*gyro_z = sensor_value_to_float(&gyro[2]);
+			r->a_body[0] = sensor_value_to_float(&accel[0]);
+			r->a_body[1] = sensor_value_to_float(&accel[1]);
+			r->gyro_z = sensor_value_to_float(&gyro[2]);
 			return true;
 		}
 	} else if (imu_backend == IMU_BNO055) {
 		struct bno055_sample s;
 
-		/* BNO055 NDOF gives gravity-free linear accel directly — exactly
-		 * what the EKF expects, no level-mount assumption needed. */
+		/* BNO055 NDOF gives gravity-free linear accel directly — exactly what
+		 * the EKF expects, no level-mount assumption. And once its mag is
+		 * calibrated, an absolute heading the MPU-6050 path cannot provide. */
 		if (bno055_read(&s)) {
-			a_body[0] = s.ax;
-			a_body[1] = s.ay;
-			*gyro_z = s.gyro_z;
+			r->a_body[0] = s.ax;
+			r->a_body[1] = s.ay;
+			r->gyro_z = s.gyro_z;
+			if (s.heading_valid && s.mag_calib >= BNO_MAG_CALIB_MIN) {
+				r->has_abs_heading = true;
+				r->heading_rad = s.heading_rad;
+			}
 			return true;
 		}
 	}
@@ -261,19 +294,27 @@ static bool imu_read_body(float a_body[2], float *gyro_z)
 
 static void imu_step(float dt)
 {
-	float a_body[2] = {0.0f, 0.0f};
-	float gyro_z = 0.0f;
+	struct imu_reading r;
 	bool stationary = false;
+	int64_t now = k_uptime_get();
 
-	if (imu_backend != IMU_NONE && imu_read_body(a_body, &gyro_z)) {
-		stationary = (hypotf(a_body[0], a_body[1]) < 0.3f) &&
-			     (fabsf(gyro_z) < 0.05f);
+	if (imu_backend != IMU_NONE && imu_read(&r)) {
+		stationary = (hypotf(r.a_body[0], r.a_body[1]) < 0.3f) &&
+			     (fabsf(r.gyro_z) < 0.05f);
+	} else {
+		memset(&r, 0, sizeof(r));
 	}
 
-	ekf_predict(&ekf, a_body, gyro_z, dt);
+	ekf_predict(&ekf, r.a_body, r.gyro_z, dt);
+
+	/* BNO055 absolute-heading update (rate-limited). MPU nodes skip this and
+	 * keep heading from gyro integration + GPS course. */
+	if (r.has_abs_heading && (now - last_hdg_ms) > HDG_PERIOD_MS) {
+		ekf_update_heading(&ekf, r.heading_rad, HDG_STD_RAD);
+		last_hdg_ms = now;
+	}
 
 	/* Zero-velocity update after staying still a while (bounds parked drift). */
-	int64_t now = k_uptime_get();
 	if (stationary) {
 		if (still_since_ms == 0) {
 			still_since_ms = now;
@@ -310,7 +351,10 @@ static void publish_fix(void)
 	ekf_get_fix(&ekf, &lat, &lon, &vn, &ve, &hdg, &pos_std, &hdg_std);
 
 	int64_t now = k_uptime_get();
-	uint8_t flags = SWARM_EKF_IMU_USED;
+	uint8_t flags = 0;
+	if (imu_backend != IMU_NONE) {
+		flags |= SWARM_EKF_IMU_USED;
+	}
 	if (present_mask & SWARM_SENS_GPS && (now - last_gps_ms) < GPS_STALE_MS) {
 		flags |= SWARM_EKF_GPS_USED;
 	}
@@ -341,8 +385,10 @@ static void sensor_thread_fn(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 	char line[NMEA_MAX];
-	int64_t last_imu = k_uptime_get();
+	int64_t start = k_uptime_get();
+	int64_t last_imu = start;
 	int64_t last_baro = 0;
+	bool placeholder_logged = false;
 
 	while (1) {
 		int64_t now = k_uptime_get();
@@ -350,6 +396,18 @@ static void sensor_thread_fn(void *a, void *b, void *c)
 		/* Drain any complete GPS lines. */
 		while (k_msgq_get(&gps_lines, line, K_NO_WAIT) == 0) {
 			handle_nmea(line);
+		}
+
+		/* No GPS lock after the grace window: anchor at the placeholder so the
+		 * node still reports a position and dead-reckons from the IMU. The
+		 * first real GPS fix (parse_gga/rmc -> ekf_update_gps_pos) re-anchors. */
+		if (!ekf_is_anchored(&ekf) && (now - start) > GPS_WAIT_MS) {
+			ekf_set_anchor_provisional(&ekf, PLACEHOLDER_LAT, PLACEHOLDER_LON);
+			if (!placeholder_logged) {
+				LOG_WRN("no GPS lock; placeholder anchor (Philadelphia), "
+					"IMU dead-reckoning until a real fix");
+				placeholder_logged = true;
+			}
 		}
 
 		/* IMU prediction at the loop rate (also runs GPS-only as constant

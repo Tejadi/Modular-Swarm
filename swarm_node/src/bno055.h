@@ -14,6 +14,7 @@
 #define SWARM_BNO055_H__
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /* One IMU sample, already normalised to the EKF's units/frame expectations. */
 struct bno055_sample {
@@ -21,7 +22,9 @@ struct bno055_sample {
 	float ay;            /* linear (gravity-free) body accel Y, m/s^2  */
 	float gyro_z;        /* yaw rate, rad/s                            */
 	float heading_rad;   /* absolute heading (compass, from North), rad */
-	bool  heading_valid; /* mag-calibrated absolute heading available  */
+	bool  heading_valid; /* the Euler heading read succeeded           */
+	uint8_t mag_calib;   /* magnetometer calib 0..3 (heading trust)    */
+	uint8_t sys_calib;   /* overall fusion calib 0..3                  */
 };
 
 /* Probe the chosen IMU I2C bus for a BNO055 (addr 0x28, then 0x29) and, if
