@@ -1,0 +1,18 @@
+# Jetson camera / perception dependencies
+# Target: JetPack 6 / L4T 36, Python 3.10, aarch64 (e.g. Orin).
+#
+# opencv + numpy normally ship with JetPack -- do NOT reinstall them if present
+# (the system build may be CUDA-enabled). Only pyrealsense2 is typically missing.
+#
+#   pip install --user -r tools/requirements-jetson.txt
+#
+# If the Jetson is offline / behind a captive portal, stage the wheel from a
+# connected host instead (see tools/README-camera.md):
+#   pip download pyrealsense2 --only-binary=:all: --platform manylinux2014_aarch64 \
+#       --python-version 310 --implementation cp -d wheels/
+#   scp wheels/*.whl <jetson>:~/wheels/
+#   ssh <jetson> 'pip install --user --no-index --find-links ~/wheels pyrealsense2'
+
+pyrealsense2==2.58.2.10647
+numpy>=1.21            # present from JetPack; pinned floor only
+opencv-python>=4.8     # present from JetPack; skip if already installed
