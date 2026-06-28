@@ -22,11 +22,16 @@
 	current-speed = <9600>;
 };
 
-/* IMU: Adafruit MPU-6050 over STEMMA QT / I2C. The XIAO's D4/D5 (STEMMA QT) pins
- * are i2c1 (SDA=P0.04/D4, SCL=P0.05/D5), which the board already enables with
- * pinctrl, so we just attach the device. AD0 low -> 0x68. The Zephyr
- * invensense,mpu6050 driver reports accel in m/s^2 and gyro in rad/s — exactly
- * what sensors.c / ekf.c expect. */
+/* IMU on the XIAO's D4/D5 (STEMMA QT) pins = i2c1 (SDA=P0.04/D4, SCL=P0.05/D5),
+ * which the board already enables with pinctrl, so we just attach devices.
+ *
+ * sensors.c AUTO-DETECTS the IMU at boot, so both supported parts can stay wired
+ * up and the firmware picks whichever actually answers:
+ *   - MPU-6050  @ 0x68  (AD0 low) — bound by the Zephyr invensense,mpu6050 driver
+ *   - BNO055    @ 0x28  (default) — read over direct I2C by bno055.c (no Zephyr
+ *                                   driver exists), via the swarm,imu-i2c chosen
+ * The MPU-6050 node below is harmless when absent: its driver init just fails and
+ * device_is_ready() returns false, and auto-detect falls through to the BNO055. */
 &i2c1 {
 	mpu6050: mpu6050@68 {
 		compatible = "invensense,mpu6050";
@@ -38,7 +43,8 @@
 / {
 	chosen {
 		swarm,serial = &board_cdc_acm_uart;
-		swarm,imu = &mpu6050;
+		swarm,imu = &mpu6050;   /* MPU-6050 path (Zephyr sensor API)        */
+		swarm,imu-i2c = &i2c1;  /* bus for direct-I2C IMUs (BNO055 @ 0x28)  */
 		swarm,gps-uart = &uart0;
 	};
 };

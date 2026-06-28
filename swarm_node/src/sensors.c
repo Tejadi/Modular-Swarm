@@ -28,6 +28,7 @@
 #include <swarm_protocol.h>
 #include "sensors.h"
 #include "ekf.h"
+#include "bno055.h"
 
 LOG_MODULE_REGISTER(swarm_sensors, CONFIG_SWARM_NODE_LOG_LEVEL);
 
@@ -61,6 +62,12 @@ static const struct device *const gps_uart = NULL;
 
 static uint16_t present_mask;
 static uint8_t  battery_pct = 100;
+
+/* Which IMU the runtime auto-detect settled on. The MPU-6050 rides the Zephyr
+ * sensor API (its devicetree node bound); the BNO055 is read over direct I2C
+ * (bno055.c). Both feed the EKF the same (body horizontal accel + yaw rate). */
+enum imu_backend { IMU_NONE = 0, IMU_MPU6050, IMU_BNO055 };
+static enum imu_backend imu_backend;
 
 /* --- GPS NMEA line assembly (ISR -> queue -> sensor thread) --- */
 
@@ -222,21 +229,43 @@ static void handle_nmea(char *line)
 
 /* --- IMU prediction step --- */
 
+/* Read body horizontal accel + yaw rate from whichever IMU auto-detect found.
+ * Body x=forward, y=left (identity mounting; calibrate a static R_sb later). */
+static bool imu_read_body(float a_body[2], float *gyro_z)
+{
+	if (imu_backend == IMU_MPU6050) {
+		struct sensor_value accel[3], gyro[3];
+
+		if (sensor_sample_fetch(imu_dev) == 0 &&
+		    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, accel) == 0 &&
+		    sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro) == 0) {
+			a_body[0] = sensor_value_to_float(&accel[0]);
+			a_body[1] = sensor_value_to_float(&accel[1]);
+			*gyro_z = sensor_value_to_float(&gyro[2]);
+			return true;
+		}
+	} else if (imu_backend == IMU_BNO055) {
+		struct bno055_sample s;
+
+		/* BNO055 NDOF gives gravity-free linear accel directly — exactly
+		 * what the EKF expects, no level-mount assumption needed. */
+		if (bno055_read(&s)) {
+			a_body[0] = s.ax;
+			a_body[1] = s.ay;
+			*gyro_z = s.gyro_z;
+			return true;
+		}
+	}
+	return false;
+}
+
 static void imu_step(float dt)
 {
-	struct sensor_value accel[3], gyro[3];
 	float a_body[2] = {0.0f, 0.0f};
 	float gyro_z = 0.0f;
 	bool stationary = false;
 
-	if (imu_dev && device_is_ready(imu_dev) &&
-	    sensor_sample_fetch(imu_dev) == 0 &&
-	    sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, accel) == 0 &&
-	    sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro) == 0) {
-		/* Body x=forward, y=left (identity mounting; calibrate R_sb later). */
-		a_body[0] = sensor_value_to_float(&accel[0]);
-		a_body[1] = sensor_value_to_float(&accel[1]);
-		gyro_z = sensor_value_to_float(&gyro[2]);
+	if (imu_backend != IMU_NONE && imu_read_body(a_body, &gyro_z)) {
 		stationary = (hypotf(a_body[0], a_body[1]) < 0.3f) &&
 			     (fabsf(gyro_z) < 0.05f);
 	}
@@ -354,9 +383,20 @@ uint16_t swarm_sensors_init(void)
 	present_mask = 0;
 	ekf_init(&ekf);
 
+	/* Auto-detect the IMU: prefer a Zephyr-driver part (MPU-6050) whose DT node
+	 * actually bound; otherwise probe a BNO055 directly on the IMU I2C bus.
+	 * Either one sets SWARM_SENS_IMU; with neither, the EKF runs GPS-only. */
 	if (imu_dev && device_is_ready(imu_dev)) {
+		imu_backend = IMU_MPU6050;
 		present_mask |= SWARM_SENS_IMU;
-		LOG_INF("IMU present: %s", imu_dev->name);
+		LOG_INF("IMU: MPU-6050 (%s)", imu_dev->name);
+	} else if (bno055_init()) {
+		imu_backend = IMU_BNO055;
+		present_mask |= SWARM_SENS_IMU;
+		LOG_INF("IMU: BNO055 (direct I2C)");
+	} else {
+		imu_backend = IMU_NONE;
+		LOG_WRN("no IMU detected — EKF runs GPS-only");
 	}
 	if (baro_dev && device_is_ready(baro_dev)) {
 		present_mask |= SWARM_SENS_BARO;
