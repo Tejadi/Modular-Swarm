@@ -142,6 +142,23 @@ int main(void)
 	}
 
 	init_identity();
+
+	/* Make the 802.15.4 extended address equal the swarm EUI (the factory
+	 * EUI64). Then the OT neighbor table's mExtAddress == the swarm node id
+	 * carried in message headers, so NEIGHBORS reports identify peers by swarm
+	 * EUI and the RSSI range table (keyed by that header EUI in
+	 * swarm_ranging_on_message) resolves in send_neighbors. That is the missing
+	 * link for peer-range fusion on the Jetson EKF. Safe here: openthread_run()
+	 * (which enables IPv6/Thread) is not called until the end of main. */
+	{
+		otExtAddress ext;
+
+		memcpy(ext.m8, g_node.eui, SWARM_EUI64_LEN);
+		if (otLinkSetExtendedAddress(g_node.ot, &ext) != OT_ERROR_NONE) {
+			LOG_WRN("could not align ext address to swarm EUI");
+		}
+	}
+
 	swarm_ranging_init();
 	serial_link_init();
 	g_node.sensors = swarm_sensors_init();

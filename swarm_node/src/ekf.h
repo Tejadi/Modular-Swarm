@@ -69,6 +69,13 @@ void ekf_update_gps_vel(struct ekf_state *s, float speed_mps, float course_rad);
  * Makes heading observable even at a standstill — the MPU-6050 path cannot. */
 void ekf_update_heading(struct ekf_state *s, float heading_compass_rad, float std_rad);
 
+/* Peer-range update: a soft constraint that this module is range_m from a peer
+ * at (peer_lat, peer_lon). std_m is the 1-sigma of the (RSSI/RTT) range. This is
+ * the decentralized peer fusion — it runs on the nRF so even a Jetson-less module
+ * folds in peers. Scalar measurement on (pN,pE); no-op until anchored. */
+void ekf_update_peer_range(struct ekf_state *s, double peer_lat, double peer_lon,
+			   float range_m, float std_m);
+
 /* Zero-velocity update — call when the module is known to be stationary. */
 void ekf_update_zupt(struct ekf_state *s);
 

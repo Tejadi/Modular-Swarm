@@ -430,6 +430,14 @@ void swarm_handle_payload(const uint8_t *buf, uint16_t len,
 		peer_update(eui, src);
 	}
 
+	/* Learn a peer's position from its telemetry for on-nRF peer-range fusion.
+	 * body = status(1) pos_source(1) lat_e7(4) lon_e7(4) ...; only a real fix. */
+	if (src && msg_type == SWARM_MSG_TELEMETRY && body_len >= 10 &&
+	    body[1] != SWARM_POS_NONE) {
+		swarm_ranging_set_peer_pos(eui, (int32_t)sys_get_le32(&body[2]),
+					   (int32_t)sys_get_le32(&body[6]));
+	}
+
 	switch (msg_type) {
 	case SWARM_MSG_HELLO:
 	case SWARM_MSG_TELEMETRY:

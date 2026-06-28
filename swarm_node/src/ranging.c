@@ -25,9 +25,14 @@ struct range_entry {
 	uint16_t rssi_range_cm;
 	uint16_t rtt_range_cm;   /* 0 = none */
 	int64_t updated_ms;
+	int32_t lat_e7, lon_e7;  /* peer's last-known absolute position */
+	bool has_pos;
 	bool valid;
 };
 static struct range_entry table[RANGE_TABLE_SIZE];
+
+#define PEER_GATE_CM 5000        /* 50 m fusion gate */
+#define PEER_FRESH_MS 30000
 
 static struct range_entry *slot_for(const uint8_t eui[8], bool create)
 {
@@ -142,4 +147,46 @@ uint16_t swarm_ranging_estimate_cm(const uint8_t eui[8])
 		return e->rtt_range_cm;
 	}
 	return e->rssi_range_cm;
+}
+
+void swarm_ranging_set_peer_pos(const uint8_t eui[8], int32_t lat_e7, int32_t lon_e7)
+{
+	struct range_entry *e = slot_for(eui, true);
+
+	if (!e) {
+		return;
+	}
+	e->lat_e7 = lat_e7;
+	e->lon_e7 = lon_e7;
+	e->has_pos = true;
+	/* updated_ms is the RANGE freshness (set by swarm_ranging_on_message, which
+	 * runs for this same received frame) — we intentionally do not touch it here,
+	 * so fusion needs a peer that is BOTH a recent radio neighbor and positioned. */
+}
+
+int swarm_ranging_get_peers(struct swarm_peer_fix *out, int max)
+{
+	int n = 0;
+	int64_t now = k_uptime_get();
+
+	for (int i = 0; i < RANGE_TABLE_SIZE && n < max; i++) {
+		struct range_entry *e = &table[i];
+		uint16_t r;
+
+		if (!e->valid || !e->has_pos) {
+			continue;
+		}
+		if ((now - e->updated_ms) > PEER_FRESH_MS) {
+			continue; /* range is stale */
+		}
+		r = e->rtt_range_cm ? e->rtt_range_cm : e->rssi_range_cm;
+		if (r == 0 || r > PEER_GATE_CM) {
+			continue; /* no range, or beyond the 50 m gate */
+		}
+		out[n].lat_e7 = e->lat_e7;
+		out[n].lon_e7 = e->lon_e7;
+		out[n].range_cm = r;
+		n++;
+	}
+	return n;
 }

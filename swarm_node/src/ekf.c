@@ -310,6 +310,57 @@ void ekf_update_heading(struct ekf_state *s, float heading_compass_rad, float st
 	update1(s, EKF_PSI, psi_meas, std_rad * std_rad, true);
 }
 
+/* Scalar measurement update with H = [hN, hE, 0, 0, 0] (a single range/row that
+ * touches pN and pE). P is symmetric, so the gain column (P H^T)[k] equals the
+ * row (H P)[k] — computed once as HP. */
+static void update_pn_pe_scalar(struct ekf_state *s, float hN, float hE,
+				float y, float r)
+{
+	float *P = s->P;
+	float HP[EKF_NX];
+
+	for (int c = 0; c < EKF_NX; c++) {
+		HP[c] = hN * P[IDX(EKF_PN, c)] + hE * P[IDX(EKF_PE, c)];
+	}
+	float S = hN * HP[EKF_PN] + hE * HP[EKF_PE] + r;
+	if (S < 1e-9f) {
+		return;
+	}
+	float K[EKF_NX];
+	for (int k = 0; k < EKF_NX; k++) {
+		K[k] = HP[k] / S;
+	}
+	for (int k = 0; k < EKF_NX; k++) {
+		s->x[k] += K[k] * y;
+	}
+	for (int rr = 0; rr < EKF_NX; rr++) {
+		for (int c = 0; c < EKF_NX; c++) {
+			P[IDX(rr, c)] -= K[rr] * HP[c];
+		}
+	}
+	p_condition(s);
+}
+
+void ekf_update_peer_range(struct ekf_state *s, double peer_lat, double peer_lon,
+			   float range_m, float std_m)
+{
+	if (!s->anchored) {
+		return;
+	}
+	/* Peer position in our ENU frame (same anchor/constants as everything else). */
+	float peer_pN = (float)((peer_lat - s->lat0) * MPD_LAT);
+	float peer_pE = (float)((peer_lon - s->lon0) * (double)s->mpd_lon);
+	float dN = s->x[EKF_PN] - peer_pN;
+	float dE = s->x[EKF_PE] - peer_pE;
+	float h = sqrtf(dN * dN + dE * dE); /* predicted range */
+
+	if (h < 0.5f) {
+		return; /* coincident — unit vector (Jacobian) is ill-conditioned */
+	}
+	/* H = d(range)/dx = unit vector from the peer to us, on (pN, pE). */
+	update_pn_pe_scalar(s, dN / h, dE / h, range_m - h, std_m * std_m);
+}
+
 void ekf_update_zupt(struct ekf_state *s)
 {
 	update2(s, EKF_VN, EKF_VE, 0.0f, 0.0f, ZUPT_R, ZUPT_R);

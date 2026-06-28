@@ -29,6 +29,7 @@
 #include "sensors.h"
 #include "ekf.h"
 #include "bno055.h"
+#include "ranging.h"
 
 LOG_MODULE_REGISTER(swarm_sensors, CONFIG_SWARM_NODE_LOG_LEVEL);
 
@@ -54,6 +55,13 @@ LOG_MODULE_REGISTER(swarm_sensors, CONFIG_SWARM_NODE_LOG_LEVEL);
 #define GPS_WAIT_MS      8000        /* give GPS this long before the placeholder */
 #define PLACEHOLDER_LAT  39.9526
 #define PLACEHOLDER_LON  (-75.1652)
+
+/* Decentralized peer-range fusion — runs HERE on the nRF (EKF #1), so even a
+ * Jetson-less module folds in peers. Each in-range peer (<=50 m) is a soft
+ * range constraint that nudges the fix. */
+#define PEER_PERIOD_MS   1000        /* fuse the current peer set this often */
+#define PEER_USED_TTL_MS 2500        /* report PEER_USED this long after a fusion */
+#define MAX_FUSE_PEERS   8
 
 /* --- optional devices, resolved from chosen{} when present --- */
 
@@ -98,6 +106,8 @@ static int32_t last_alt_cm;          /* altitude rides outside the EKF (GPS GGA)
 static int64_t last_gps_ms;
 static int64_t still_since_ms;        /* monotonic time the unit went stationary */
 static int64_t last_hdg_ms;           /* last BNO055 absolute-heading update */
+static int64_t last_peer_ms;          /* last peer-range fusion cycle */
+static int64_t peer_used_ms;          /* last time a peer range was fused */
 
 /* Cached fused fix + a Jetson-injected pose; read by swarm_sensors_read(). */
 static struct k_spinlock fix_lock;
@@ -326,6 +336,30 @@ static void imu_step(float dt)
 	}
 }
 
+/* --- decentralized peer-range fusion (EKF #1, on the nRF) --- */
+
+static void peer_fusion_step(void)
+{
+	struct swarm_peer_fix peers[MAX_FUSE_PEERS];
+	int n;
+
+	if (!ekf_is_anchored(&ekf)) {
+		return; /* need our own ENU anchor before a peer range means anything */
+	}
+	n = swarm_ranging_get_peers(peers, MAX_FUSE_PEERS);
+	for (int i = 0; i < n; i++) {
+		float range_m = peers[i].range_cm / 100.0f;
+		/* Coarse RSSI/RTT ranges -> treat as SOFT (std ~ half the range,
+		 * floored) so a peer nudges rather than snaps the fix and peer-of-peer
+		 * correlation can't dominate. */
+		float std_m = range_m * 0.5f < 5.0f ? 5.0f : range_m * 0.5f;
+
+		ekf_update_peer_range(&ekf, (double)peers[i].lat_e7 / 1e7,
+				      (double)peers[i].lon_e7 / 1e7, range_m, std_m);
+		peer_used_ms = k_uptime_get();
+	}
+}
+
 /* --- publish the latest fused fix into the read cache --- */
 
 static uint8_t quality_from_std(float pos_std_m)
@@ -357,6 +391,9 @@ static void publish_fix(void)
 	}
 	if (present_mask & SWARM_SENS_GPS && (now - last_gps_ms) < GPS_STALE_MS) {
 		flags |= SWARM_EKF_GPS_USED;
+	}
+	if ((now - peer_used_ms) < PEER_USED_TTL_MS) {
+		flags |= SWARM_EKF_PEER_USED;
 	}
 	if (ekf.converged) {
 		flags |= SWARM_EKF_CONVERGED;
@@ -415,6 +452,12 @@ static void sensor_thread_fn(void *a, void *b, void *c)
 		float dt = (now - last_imu) / 1000.0f;
 		last_imu = now;
 		imu_step(dt);
+
+		/* Decentralized peer-range fusion, rate-limited (ranges are sporadic). */
+		if (now - last_peer_ms > PEER_PERIOD_MS) {
+			peer_fusion_step();
+			last_peer_ms = now;
+		}
 
 		if ((present_mask & SWARM_SENS_BARO) && now - last_baro > BARO_PERIOD_MS) {
 			struct sensor_value press;

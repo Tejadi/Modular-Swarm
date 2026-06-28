@@ -235,54 +235,76 @@ Exercises the whole command-station pipeline on one machine.
    `ceres/**`; the Rust bridge default is `olympus`). Set `SWARM_VEHICLE_API_KEY`
    only if vehicle-api auth is enabled (it is off by default).
 
-#### B. On hardware
+#### B. On hardware — set up the whole swarm
 
-1. Build + flash the firmware (needs the nRF Connect SDK toolchain — see
-   [Building](#building)):
+A **module** = a Seeed XIAO nRF52840 carrying GPS + IMU, optionally plugged into a
+companion computer (e.g. a Jetson, but any Linux host works) for a camera. **One**
+module is the **leader** — the command-station bridge and fleet anchor; it runs no
+autonomy and does not move. Every other module is a **member** — autonomous and
+overridable. Same codebase on every board; a build flag picks the role.
 
-   ```bash
-   cd swarm_node
-   ./build.sh                 # plain node (provider+relay) — flash >= 2 boards
-   ./build.sh --gateway       # command-station gateway — flash 1, wire it to the host
-   ```
+**1 — Build + flash the firmware** (needs the nRF Connect SDK toolchain — see
+[Building](#building)):
 
-   Role / mount / name are Kconfig options (`CONFIG_SWARM_ROLE_*`,
-   `CONFIG_SWARM_MOUNT_VEHICLE`, `CONFIG_SWARM_NODE_NAME`, `CONFIG_SWARM_ATTACHED_TO`);
-   wire the modular IMU / GPS in the board overlay (`boards/*.overlay`). Missing
-   sensors degrade gracefully — their HELLO bit stays cleared and the station ranges
-   the module instead.
+```bash
+cd swarm_node
+./build.sh --leader        # the LEADER  (gateway + anchor)  — flash exactly ONE board
+./build.sh                 # a  MEMBER   (autonomous vehicle) — flash EACH member board
+```
 
-   The **IMU is auto-detected at boot** (`sensors.c`): an **MPU-6050** (`0x68`, Zephyr
-   driver) *or* a **BNO055** (`0x28`, direct-I2C `bno055.c` since NCS ships no driver).
-   Both can stay wired; the firmware uses whichever answers. A BNO055 additionally
-   feeds its magnetometer-corrected **absolute heading** into EKF #1 (observable even
-   at a standstill); MPU-6050 nodes keep heading from gyro + GPS course. With **no GPS
-   lock** the node anchors at a **placeholder** (Philadelphia) and dead-reckons from
-   the IMU so it still reports a position; the first real GPS fix re-anchors at the
-   true location, and the IMU keeps dead-reckoning if GPS is later lost.
+The XIAO has no debug probe in this setup, so flash over its **UF2 bootloader**:
+double-tap the RESET button (two presses < 0.5 s) to mount the `XIAO-SENSE` drive,
+then copy `build/swarm_node/zephyr/zephyr.uf2` onto it. The board reboots into the
+firmware. Console/logs are on SEGGER RTT; the single USB-CDC port carries the
+binary swarm-data link.
 
-2. Confirm the mesh forms: on each board's `ot` shell console, `ot state` reaches
-   `child` / `router` / `leader`.
+**Sensors** (per board overlay, `boards/*.overlay`): GPS on `uart0` (D6/D7, 9600
+NMEA), IMU on `i2c1` (D4/D5). The IMU is **auto-detected** at boot — MPU-6050
+(`0x68`) *or* BNO055 (`0x28`); a BNO055 also supplies a magnetometer-corrected
+absolute heading. With no GPS lock a node anchors at a placeholder and
+dead-reckons from the IMU; the first real fix re-anchors at the true location.
+Nodes within ~50 m fuse each other's positions (peer-range fusion, on the nRF).
 
-3. On the command-station host, wire the gateway's swarm **data** CDC port (the
-   second `/dev/ttyACM*` — the first is the `ot` shell) and run:
+**2 — Bring up the command station** on whatever computer the **leader** is plugged
+into (any Linux host with Docker + Docker Compose v2.20+ and Python 3.9+). It runs
+the Olympus stack, bridges the mesh, and serves the dashboard:
 
-   ```bash
-   python3 -m olympus_link --port /dev/ttyACM0 --prefix ceres --sink rest \
-       --vehicle-api http://localhost:3001
-   ```
+```bash
+# from your olympus checkout — zenoh router + vehicle-api + the dashboard:
+docker compose up -d zenoh-router vehicle-api dashboard
 
-4. (optional, redundant IP path) On each agent's Jetson, run the companion:
+# from nRF-swarm — bridge the leader's mesh traffic into the dashboard:
+ls /dev/ttyACM*            # find the leader's data port (usually /dev/ttyACM0)
+python3 -m olympus_link --port /dev/ttyACM0 --prefix ceres --sink rest \
+    --zenoh-rest http://localhost:8000 --vehicle-api http://localhost:3001
+```
 
-   ```bash
-   python3 -m jetson_agent --port /dev/ttyACM1 --prefix ceres \
-       --vehicle-api http://<command-station>:3001
-   # add SWARM_JETSON_GPS=gpsd to fold in a Jetson-side GPS
-   ```
+Open **http://localhost:3000**. Every node the leader hears over the mesh appears
+automatically — the leader as the **Command Station**, the rest as **Member 1,
+2, …** (scout mode if a member carries a camera, executor mode if not) — each with
+its live pose, heading, and onboard-sensor list.
 
-5. Power on modules — each registers as it comes online and the autorouter connects
-   them. Detach a module from its vehicle (or change its role) and the command
-   center updates live.
+**3 — (optional) Member brain** — on each member that has a companion computer, run
+the per-vehicle agent for camera VIO + detections + EKF #2 pose refinement. It is
+**not** the dashboard — the GUI is leader-only:
+
+```bash
+# on the member's companion computer:
+ls /dev/ttyACM*
+python3 -m jetson_agent --port /dev/ttyACM0 --prefix ceres --sink dryrun -v
+```
+
+The agent refines the nRF fix with the camera and injects it back; the nRF
+broadcasts the result on the mesh, so a member reaches the command station via the
+leader with **no direct network link**. Add `--sink rest --zenoh-rest
+http://<command-station-host>:8000` only if you want a redundant IP path straight
+to the command station.
+
+**4 — Verify.** Power the nodes on; each registers as it joins the mesh. Confirm a
+mesh forms (`ot state` reaches `child`/`router`/`leader` on the RTT shell). Two
+nodes in radio range fuse each other — a member's `ekf_flags` gains the `PEER` bit.
+Take a unit outside for a GPS lock and its marker snaps from the placeholder to its
+true position.
 
 ---
 
