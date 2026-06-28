@@ -64,6 +64,28 @@ def cam_to_geo(pt, vlat, vlon, vhead_deg):
             vlon + dE / (111320.0 * math.cos(math.radians(vlat))))
 
 
+# Live pose: with SWARM_NODE_EUI set, poll this node's telemetry so detection
+# geo tracks the moving scout; otherwise the static args are used.
+NODE_EUI = os.environ.get("SWARM_NODE_EUI", "").strip()
+pose = {"lat": VLAT, "lon": VLON, "head": VHEAD}
+_pose_t = 0.0
+
+
+def refresh_pose():
+    global _pose_t
+    if not NODE_EUI or time.time() - _pose_t < 2.0:
+        return
+    _pose_t = time.time()
+    try:
+        r = urllib.request.urlopen(f"{ZENOH_REST}/ceres/swarm/{NODE_EUI}/telemetry", timeout=1.5)
+        v = json.loads(r.read())[0]["value"]; p = v.get("position", {})
+        if p.get("latitude") is not None:
+            pose["lat"], pose["lon"] = p["latitude"], p["longitude"]
+            pose["head"] = v.get("heading", pose["head"])
+    except Exception:
+        pass
+
+
 net = cv2.dnn.readNetFromONNX(ONNX)
 net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
 net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
@@ -71,15 +93,22 @@ net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 pipe = rs.pipeline(); cfg = rs.config()
 cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
 cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-prof = pipe.start(cfg)
+try:
+    prof = pipe.start(cfg)
+except Exception as e:
+    print(f"no RealSense camera ({e}); perception idle, exiting")
+    sys.exit(0)
 align = rs.align(rs.stream.color)
 intr = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
 
 t_start = time.time(); n = 0; last = 0.0
-print(f"YOLOv8n people detector (opencv DNN/CPU) on D435i  for ~{RUN_S:.0f}s")
-print(f"vehicle pose: lat={VLAT:.5f} lon={VLON:.5f} heading={VHEAD:.0f}deg  publish={PUBLISH}")
+forever = RUN_S <= 0
+print(f"YOLOv8n people detector (opencv DNN/CPU) on D435i  ({'forever' if forever else f'~{RUN_S:.0f}s'})")
+print(f"pose: lat={pose['lat']:.5f} lon={pose['lon']:.5f} heading={pose['head']:.0f}deg  "
+      f"publish={PUBLISH}  live_pose={'on:' + NODE_EUI if NODE_EUI else 'off'}")
 try:
-    while time.time() - t_start < RUN_S:
+    while forever or time.time() - t_start < RUN_S:
+        refresh_pose()
         fr = align.process(pipe.wait_for_frames())
         d = fr.get_depth_frame(); c = fr.get_color_frame()
         if not d or not c:
@@ -113,7 +142,7 @@ try:
             pt = rs.rs2_deproject_pixel_to_point(intr, [ucx, ucy], z) if z > 0 else [0, 0, 0]
             rng = math.sqrt(pt[0] ** 2 + pt[1] ** 2 + pt[2] ** 2)
             bearing = math.degrees(math.atan2(pt[0], pt[2])) if z > 0 else 0.0
-            lat, lon = cam_to_geo(pt, VLAT, VLON, VHEAD) if z > 0 else (VLAT, VLON)
+            lat, lon = cam_to_geo(pt, pose["lat"], pose["lon"], pose["head"]) if z > 0 else (pose["lat"], pose["lon"])
             dets.append((float(scores[i]), z, rng, bearing, pt, lat, lon))
         if dets and time.time() - last > PUB_EVERY:
             last = time.time()

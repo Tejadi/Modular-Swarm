@@ -1,0 +1,18 @@
+[Unit]
+Description=Swarm perception (YOLO people detector on a scout's camera)
+After=swarm-node.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+EnvironmentFile=-/etc/default/swarm-node
+WorkingDirectory=@REPO@
+# RUN_S=0 -> run forever. people_detect.py exits cleanly if no camera is present
+# (so this unit is harmless to enable on executors; it just re-checks on restart).
+ExecStart=@PY@ @REPO@/tools/people_detect.py ${SWARM_YOLO_ONNX} 0
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

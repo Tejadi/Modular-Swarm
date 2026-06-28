@@ -1,0 +1,17 @@
+[Unit]
+Description=Swarm node (auto-detects leader/member from the nRF and runs the right stack)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+EnvironmentFile=-/etc/default/swarm-node
+WorkingDirectory=@REPO@
+ExecStart=@PY@ @REPO@/tools/swarm_boot.py
+Restart=always
+RestartSec=5
+# nRF + camera may enumerate a few seconds after boot; swarm_boot waits for them.
+
+[Install]
+WantedBy=multi-user.target
