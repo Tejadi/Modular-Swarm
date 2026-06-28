@@ -97,9 +97,9 @@ class SwarmLinkService:
             log.warning("orphaned modules (no path to gateway): %s", orphans)
 
         # 5. Stream telemetry for every online module + publish the topology.
+        #    The gateway is published too: a leader is a gateway AND a real
+        #    GPS+IMU node, so it belongs on the map as a swarm node.
         for m in self.reg.online_modules():
-            if m.eui == self.reg.gateway_eui:
-                continue
             await self.olympus.publish_telemetry(m)
         await self.olympus.publish_topology(self.router.topology())
 

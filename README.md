@@ -252,6 +252,15 @@ Exercises the whole command-station pipeline on one machine.
    sensors degrade gracefully — their HELLO bit stays cleared and the station ranges
    the module instead.
 
+   The **IMU is auto-detected at boot** (`sensors.c`): an **MPU-6050** (`0x68`, Zephyr
+   driver) *or* a **BNO055** (`0x28`, direct-I2C `bno055.c` since NCS ships no driver).
+   Both can stay wired; the firmware uses whichever answers. A BNO055 additionally
+   feeds its magnetometer-corrected **absolute heading** into EKF #1 (observable even
+   at a standstill); MPU-6050 nodes keep heading from gyro + GPS course. With **no GPS
+   lock** the node anchors at a **placeholder** (Philadelphia) and dead-reckons from
+   the IMU so it still reports a position; the first real GPS fix re-anchors at the
+   true location, and the IMU keeps dead-reckoning if GPS is later lost.
+
 2. Confirm the mesh forms: on each board's `ot` shell console, `ot state` reaches
    `child` / `router` / `leader`.
 

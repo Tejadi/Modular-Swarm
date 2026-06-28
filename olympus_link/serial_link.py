@@ -58,6 +58,17 @@ class AsyncSerial:
             ispeed = ospeed = _BAUD[baud]
         termios.tcsetattr(self.fd, termios.TCSANOW,
                           [iflag, oflag, cflag, lflag, ispeed, ospeed, cc])
+        # Assert DTR (+RTS). The nRF's USB-CDC gates TX on DTR, so without this
+        # the device transmits nothing (opening with plain `cat` reads empty).
+        try:
+            import fcntl
+            import struct
+            TIOCMBIS = 0x5416
+            TIOCM_DTR, TIOCM_RTS = 0x002, 0x004
+            fcntl.ioctl(self.fd, TIOCMBIS,
+                        struct.pack("I", TIOCM_DTR | TIOCM_RTS))
+        except Exception:  # pragma: no cover - best effort
+            pass
 
     def start(self, loop) -> None:
         self._loop = loop
