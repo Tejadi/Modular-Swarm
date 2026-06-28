@@ -300,6 +300,53 @@ leader with **no direct network link**. Add `--sink rest --zenoh-rest
 http://<command-station-host>:8000` only if you want a redundant IP path straight
 to the command station.
 
+**3b — (scout members) Camera + people detection.** A member carrying an Intel
+RealSense D435i runs metric **RGB-D visual odometry** plus a YOLO **people
+detector** that projects each detection to map (lat/lon) coordinates and publishes
+it to the dashboard. It needs only `pyrealsense2` on top of the opencv + numpy that
+ship with JetPack — **no torch/ultralytics on the Jetson** (YOLO runs through
+opencv's DNN module on an exported ONNX model). Full detail:
+[tools/README-camera.md](tools/README-camera.md).
+
+```bash
+# 1. install pyrealsense2. If the Jetson is offline or behind a captive portal
+#    (its own WiFi can't reach PyPI), stage the wheel from a connected host:
+pip download pyrealsense2 --only-binary=:all: --platform manylinux2014_aarch64 \
+    --python-version 310 --implementation cp -d wheels/
+scp wheels/*.whl <jetson>:~/wheels/
+ssh <jetson> 'pip install --user --no-index --find-links ~/wheels pyrealsense2'
+
+# 2. export the YOLO model once on any host that has internet, copy it over:
+python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt').export(format='onnx', imgsz=640, opset=12)"
+scp yolov8n.onnx <jetson>:~/
+
+# 3. run (D435i must be on a USB-3 port):
+python3 tools/rgbd_vio.py 20                       # metric VIO — move the camera, watch dFwd/dYaw
+python3 tools/people_detect.py ~/yolov8n.onnx 0    # people detector -> map; runs forever
+```
+
+The D435i's onboard IMU isn't exposed by the stock V4L2 stack (it needs kernel
+HID/IIO modules), but that doesn't matter — depth already makes the VIO metric, and
+the swarm's IMU is the nRF's BNO055 feeding EKF #1.
+
+**3c — Autostart for a mobile run.** So every module powers up and launches the
+right stack with **no SSH**. `swarm_boot` reads the role straight from the
+**attached nRF** (the leader/gateway nRF advertises the GATEWAY/LEADER flag) — the
+Jetsons are interchangeable, the nRF firmware is the role; you never pre-assign a
+Jetson. Full detail: [tools/README-autostart.md](tools/README-autostart.md).
+
+```bash
+sudo tools/install-autostart.sh
+sudo nano /etc/default/swarm-node      # endpoints + map anchor; SWARM_ROLE=auto (detect from nRF)
+sudo systemctl start swarm-node        # journalctl -u swarm-node -f -> "role probe -> leader|member"
+sudo systemctl enable --now swarm-perception   # scouts only: run the YOLO detector on boot
+```
+
+On boot the launcher picks: **leader → `olympus_link`** (mesh→dashboard bridge),
+**member → `jetson_agent`** (which auto-detects the camera → scout vs executor).
+`Restart=always`, and members that power off gray out then drop off the map on
+their own (liveness TTL).
+
 **4 — Verify.** Power the nodes on; each registers as it joins the mesh. Confirm a
 mesh forms (`ot state` reaches `child`/`router`/`leader` on the RTT shell). Two
 nodes in radio range fuse each other — a member's `ekf_flags` gains the `PEER` bit.
@@ -607,6 +654,13 @@ nRF-swarm/
 │   └── prj.conf, overlay-gateway.conf, Kconfig, build.sh
 ├── olympus_link/                # command station: registry, localization, autorouter, Olympus push
 ├── jetson_agent/                # per-agent companion: redundant IP path + Jetson sensor fusion
+├── jetson_perception/           # YOLO detection process (feeds the agent over a local socket)
+├── tools/                       # Jetson bring-up + ops scripts
+│   ├── rgbd_vio.py              #   metric RGB-D visual odometry (opencv + pyrealsense2)
+│   ├── people_detect.py         #   YOLO people detector -> depth -> geo -> dashboard (opencv DNN)
+│   ├── swarm_boot.py            #   boot launcher: detect leader/member from the nRF, run the stack
+│   ├── swarm-node.service, swarm-perception.service, install-autostart.sh
+│   └── README-camera.md, README-autostart.md, requirements-jetson.txt
 ├── sim/                         # PTY swarm simulator + automated end-to-end test
 ├── OLYMPUS_INTEGRATION.md       # full design + verification status
 │
