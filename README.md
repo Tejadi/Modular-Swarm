@@ -1,4 +1,4 @@
-# nRF Reconfigurable Swarm — Thread/CoAP mesh with an Olympus command center
+# Reconfigurable Swarm — Thread/CoAP mesh with an Olympus command center
 
 This repo began as the Nordic **OpenThread CoAP** sample pair (`coap_server` /
 `coap_client`) on the **Seeed XIAO nRF52840**, and now hosts a **reconfigurable,
