@@ -1,0 +1,52 @@
+[package]
+name = "olympus-bridge"
+version = "0.1.0"
+edition = "2021"
+authors = ["OLYMPUS OS Team"]
+description = "Zenoh-LoRa-ROS2 Bridge for OLYMPUS Agricultural Drone Network"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full", "rt-multi-thread", "macros", "sync", "time"] }
+zenoh = { version = "0.11", features = ["default"] }
+meshtastic = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+prost = "0.12"
+prost-types = "0.12"
+config = "0.14"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "1.0"
+anyhow = "1.0"
+tokio-serial = "5.4"
+serialport = "4.3"
+# 0.13.1 (the only non-yanked 0.13) lacks the tokio-1 feature; 0.13.2 has it but
+# is yanked (unusable without a pre-existing lock). 0.14 is the nearest non-yanked
+# version that exposes tokio-1.
+mavlink = { version = "0.14", features = ["ardupilotmega", "tokio-1"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+bytes = "1.5"
+rmp-serde = "1.1"
+futures = "0.3"
+async-trait = "0.1"
+geo = "0.27"
+proj = "0.27"
+
+[build-dependencies]
+prost-build = "0.12"
+
+[[bin]]
+name = "olympus-bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "olympus-telemetry"
+path = "src/bin/telemetry_service.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

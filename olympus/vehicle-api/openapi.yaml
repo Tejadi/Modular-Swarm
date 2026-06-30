@@ -1,0 +1,1039 @@
+openapi: 3.1.0
+info:
+  title: OLYMPUS OS Vehicle API
+  description: >
+    REST and WebSocket gateway for the OLYMPUS OS drone fleet coordination
+    system. Provides vehicle management, mission control, detection tracking,
+    telemetry metrics, webhook event delivery, and an AI advisor chat proxy.
+    All protected endpoints require a Bearer token in the Authorization header.
+  version: 1.0.0
+  contact:
+    name: OLYMPUS OS Team
+
+servers:
+  - url: http://localhost:3001
+    description: Local development server
+
+tags:
+  - name: health
+    description: Service health and readiness
+  - name: vehicles
+    description: Vehicle registry, telemetry ingestion, and command dispatch
+  - name: mission
+    description: Mission lifecycle (start, monitor, abort)
+  - name: detections
+    description: Detection records from scout vehicles
+  - name: metrics
+    description: Historical telemetry and detection summary queries
+  - name: webhooks
+    description: Webhook registration and listing for event delivery
+  - name: advisor
+    description: AI advisor chat proxy
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ── Health ──────────────────────────────────────────────────────────
+  /api/v1/health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      description: >
+        Returns service status and Zenoh connectivity. This endpoint is
+        **not** protected by authentication.
+      tags:
+        - health
+      security: []
+      responses:
+        "200":
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Vehicles ────────────────────────────────────────────────────────
+  /api/v1/vehicles:
+    get:
+      operationId: listVehicles
+      summary: List all registered vehicles
+      description: Returns every vehicle currently held in the in-memory registry.
+      tags:
+        - vehicles
+      responses:
+        "200":
+          description: Array of vehicle records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VehicleRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/vehicles/{id}:
+    get:
+      operationId: getVehicle
+      summary: Get a single vehicle by ID
+      tags:
+        - vehicles
+      parameters:
+        - $ref: "#/components/parameters/VehicleId"
+      responses:
+        "200":
+          description: Vehicle found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VehicleRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/VehicleNotFound"
+
+  /api/v1/vehicles/{id}/command:
+    post:
+      operationId: sendCommand
+      summary: Send a command to a vehicle
+      description: >
+        Dispatches a command to the specified vehicle via Zenoh pub/sub.
+        Requires the `command:all` or `command:own` scope. Allowed commands:
+        ARM, DISARM, TAKEOFF, LAND, RTL, PAUSE, RESUME, GOTO, GO_TO,
+        ABORT, ABORT_ALL, EMERGENCY_STOP, SET_ALTITUDE, SET_SPEED,
+        START_SCAN, EXECUTE_TASK.
+      tags:
+        - vehicles
+      parameters:
+        - $ref: "#/components/parameters/VehicleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandRequest"
+      responses:
+        "200":
+          description: Command accepted and dispatched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/VehicleNotFound"
+        "502":
+          $ref: "#/components/responses/ZenohError"
+
+  /api/v1/vehicles/register:
+    post:
+      operationId: registerVehicle
+      summary: Register a new vehicle
+      description: >
+        Adds a vehicle to the in-memory registry. Requires the
+        `write:telemetry` scope. Valid roles: scout, executor, partner,
+        ground_vehicle, aircraft.
+      tags:
+        - vehicles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Vehicle registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/vehicles/{id}/telemetry:
+    post:
+      operationId: ingestTelemetry
+      summary: Ingest telemetry for a vehicle
+      description: >
+        Accepts partial telemetry updates for a vehicle. Creates the vehicle
+        record if it does not already exist. Requires the `write:telemetry`
+        scope. The update is also forwarded to Zenoh and logged to the
+        metrics database.
+      tags:
+        - vehicles
+      parameters:
+        - $ref: "#/components/parameters/VehicleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelemetryIngest"
+      responses:
+        "200":
+          description: Telemetry accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Mission ─────────────────────────────────────────────────────────
+  /api/v1/mission:
+    get:
+      operationId: getMission
+      summary: Get current mission state
+      description: >
+        Returns the current mission phase, start time, elapsed seconds, and
+        the list of active vehicle IDs. The elapsed_seconds field is
+        computed live from the start_time.
+      tags:
+        - mission
+      responses:
+        "200":
+          description: Current mission state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/mission/start:
+    post:
+      operationId: startMission
+      summary: Start a new mission
+      description: >
+        Transitions mission phase to "active" and publishes a MISSION_START
+        command via Zenoh. Can only be called when the mission is in "idle",
+        "completed", or "aborted" phase.
+      tags:
+        - mission
+      responses:
+        "200":
+          description: Mission started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Mission cannot be started from current phase
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/mission/abort:
+    post:
+      operationId: abortMission
+      summary: Abort the current mission
+      description: >
+        Transitions mission phase to "aborted" and publishes an ABORT_ALL
+        command via Zenoh to all vehicles.
+      tags:
+        - mission
+      responses:
+        "200":
+          description: Mission aborted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MissionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/ZenohError"
+
+  # ── Detections ──────────────────────────────────────────────────────
+  /api/v1/detections:
+    get:
+      operationId: listDetections
+      summary: List all detections
+      description: Returns every detection record currently held in memory.
+      tags:
+        - detections
+      responses:
+        "200":
+          description: Array of detection records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DetectionRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Metrics ─────────────────────────────────────────────────────────
+  /api/v1/metrics/telemetry:
+    get:
+      operationId: queryTelemetry
+      summary: Query historical telemetry
+      description: >
+        Returns telemetry log entries from the metrics database, ordered by
+        timestamp descending. Supports filtering by vehicle ID and time
+        range. Maximum limit is 10000.
+      tags:
+        - metrics
+      parameters:
+        - name: vehicle_id
+          in: query
+          required: false
+          description: Filter by vehicle ID
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Start of time range (ISO 8601 / RFC 3339)
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: End of time range (ISO 8601 / RFC 3339)
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of entries to return (default 1000, max 10000)
+          schema:
+            type: integer
+            format: uint32
+            default: 1000
+            minimum: 1
+            maximum: 10000
+      responses:
+        "200":
+          description: Array of telemetry log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TelemetryLogEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: Metrics database unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/metrics/detections/summary:
+    get:
+      operationId: detectionSummary
+      summary: Get detection counts grouped by type
+      description: >
+        Returns a summary of detections grouped by detection_type with
+        counts, ordered by count descending.
+      tags:
+        - metrics
+      responses:
+        "200":
+          description: Array of detection type summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DetectionSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: Metrics database unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Webhooks ────────────────────────────────────────────────────────
+  /api/v1/webhooks:
+    post:
+      operationId: registerWebhook
+      summary: Register a webhook
+      description: >
+        Registers a new webhook endpoint for event delivery. The URL must
+        use HTTPS. Allowed events: detection, task_assigned,
+        task_completed, mission_start, mission_abort, vehicle_online,
+        vehicle_offline. An optional secret is hashed (SHA-256) and used
+        to sign outgoing payloads via the X-Olympus-Signature header.
+      tags:
+        - webhooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRegistration"
+      responses:
+        "201":
+          description: Webhook registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookRegisterResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      operationId: listWebhooks
+      summary: List webhooks
+      description: >
+        Returns webhooks belonging to the authenticated partner. Partners
+        with the `*` scope can see all webhooks.
+      tags:
+        - webhooks
+      responses:
+        "200":
+          description: Array of webhook entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebhookEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Advisor ─────────────────────────────────────────────────────────
+  /api/v1/advisor/chat:
+    post:
+      operationId: advisorChat
+      summary: Chat with the AI advisor
+      description: >
+        Proxies a chat message to the Python brain advisor service. The
+        message must be non-empty and at most 2000 characters.
+      tags:
+        - advisor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: Advisor response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          description: Advisor returned an error or unparseable response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Advisor service is unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── WebSocket ───────────────────────────────────────────────────────
+  /api/v1/ws/telemetry:
+    get:
+      operationId: telemetryWebSocket
+      summary: Real-time telemetry WebSocket stream
+      description: >
+        Upgrades to a WebSocket connection that streams TelemetryEvent
+        objects as JSON text frames in real time. Events are sourced from
+        the Zenoh telemetry broadcast channel.
+      tags:
+        - vehicles
+      responses:
+        "101":
+          description: WebSocket upgrade successful
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  # ── Security Schemes ────────────────────────────────────────────────
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        API key passed as a Bearer token in the Authorization header.
+        When no API keys are configured the server runs in dev mode with
+        authentication disabled.
+
+  # ── Reusable Parameters ─────────────────────────────────────────────
+  parameters:
+    VehicleId:
+      name: id
+      in: path
+      required: true
+      description: >
+        Unique vehicle identifier (1-64 characters, alphanumeric plus
+        hyphens and underscores).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9_-]+$"
+
+  # ── Reusable Responses ──────────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    VehicleNotFound:
+      description: Vehicle ID not found in registry
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ZenohError:
+      description: Zenoh communication failure
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Schemas ─────────────────────────────────────────────────────────
+  schemas:
+    # -- Shared --
+    Position:
+      type: object
+      description: WGS-84 geographic position with heading
+      required:
+        - latitude
+        - longitude
+        - altitude
+        - heading
+      properties:
+        latitude:
+          type: number
+          format: double
+          description: Latitude in decimal degrees
+        longitude:
+          type: number
+          format: double
+          description: Longitude in decimal degrees
+        altitude:
+          type: number
+          format: double
+          description: Altitude in metres (AMSL)
+        heading:
+          type: number
+          format: float
+          description: Heading in degrees (0-360)
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - status
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        status:
+          type: integer
+          description: HTTP status code
+          examples:
+            - 400
+            - 404
+            - 409
+            - 500
+            - 502
+
+    OkResponse:
+      type: object
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+          description: Always true on success
+          const: true
+
+    # -- Health --
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - zenoh_connected
+      properties:
+        status:
+          type: string
+          description: Service status
+          examples:
+            - "ok"
+        zenoh_connected:
+          type: boolean
+          description: Whether the Zenoh middleware session is connected
+
+    # -- Vehicles --
+    VehicleRecord:
+      type: object
+      required:
+        - id
+        - role
+        - status
+        - position
+        - battery_pct
+        - signal_rssi
+        - last_seen
+      properties:
+        id:
+          type: string
+          description: Unique vehicle identifier
+        role:
+          type: string
+          description: Vehicle role
+          enum:
+            - scout
+            - executor
+            - partner
+            - ground_vehicle
+            - aircraft
+        status:
+          type: string
+          description: Current operational status
+        position:
+          $ref: "#/components/schemas/Position"
+        battery_pct:
+          type: integer
+          format: uint8
+          minimum: 0
+          maximum: 255
+          description: Battery percentage
+        signal_rssi:
+          type: integer
+          format: int16
+          description: Signal RSSI in dBm
+        current_task:
+          type: string
+          nullable: true
+          description: ID of the currently assigned task, or null
+        last_seen:
+          type: string
+          format: date-time
+          description: Last telemetry timestamp (RFC 3339)
+        tank_level:
+          type: number
+          format: float
+          nullable: true
+          description: Spray/liquid tank fill level (0.0-1.0), if applicable
+
+    CommandRequest:
+      type: object
+      required:
+        - command
+      properties:
+        command:
+          type: string
+          description: >
+            Command verb. Allowed values: ARM, DISARM, TAKEOFF, LAND, RTL,
+            PAUSE, RESUME, GOTO, GO_TO, ABORT, ABORT_ALL, EMERGENCY_STOP,
+            SET_ALTITUDE, SET_SPEED, START_SCAN, EXECUTE_TASK.
+          enum:
+            - ARM
+            - DISARM
+            - TAKEOFF
+            - LAND
+            - RTL
+            - PAUSE
+            - RESUME
+            - GOTO
+            - GO_TO
+            - ABORT
+            - ABORT_ALL
+            - EMERGENCY_STOP
+            - SET_ALTITUDE
+            - SET_SPEED
+            - START_SCAN
+            - EXECUTE_TASK
+        params:
+          description: Arbitrary JSON parameters for the command
+          default: {}
+
+    CommandResponse:
+      type: object
+      required:
+        - ok
+        - message
+        - command_id
+      properties:
+        ok:
+          type: boolean
+          description: Whether the command was accepted
+        message:
+          type: string
+          description: Human-readable status message
+        command_id:
+          type: string
+          format: uuid
+          description: Unique command tracking ID
+
+    RegisterRequest:
+      type: object
+      required:
+        - vehicle_id
+        - role
+      properties:
+        vehicle_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: Unique vehicle identifier
+        role:
+          type: string
+          description: Vehicle role
+          enum:
+            - scout
+            - executor
+            - partner
+            - ground_vehicle
+            - aircraft
+        capabilities:
+          type: array
+          items:
+            type: string
+          default: []
+          description: List of capability tags
+        position:
+          $ref: "#/components/schemas/Position"
+          nullable: true
+          description: Initial position (defaults to 0,0,0 heading 0)
+
+    RegisterResponse:
+      type: object
+      required:
+        - ok
+        - vehicle_id
+        - message
+      properties:
+        ok:
+          type: boolean
+          const: true
+        vehicle_id:
+          type: string
+          description: The registered vehicle ID
+        message:
+          type: string
+          description: Confirmation message
+
+    TelemetryIngest:
+      type: object
+      description: >
+        Partial telemetry update. All fields are optional; only provided
+        fields are applied to the vehicle record.
+      properties:
+        position:
+          $ref: "#/components/schemas/Position"
+          nullable: true
+        battery_pct:
+          type: integer
+          format: uint8
+          minimum: 0
+          maximum: 255
+          nullable: true
+        status:
+          type: string
+          nullable: true
+        signal_rssi:
+          type: integer
+          format: int16
+          nullable: true
+        tank_level:
+          type: number
+          format: float
+          nullable: true
+
+    # -- Mission --
+    MissionState:
+      type: object
+      required:
+        - phase
+        - elapsed_seconds
+        - active_vehicles
+      properties:
+        phase:
+          type: string
+          description: Current mission phase
+          enum:
+            - idle
+            - active
+            - completed
+            - aborted
+        start_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO 8601 timestamp of mission start, null when idle
+        elapsed_seconds:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: Seconds elapsed since mission start (computed live)
+        active_vehicles:
+          type: array
+          items:
+            type: string
+          description: Vehicle IDs participating in the mission
+
+    # -- Detections --
+    DetectionRecord:
+      type: object
+      required:
+        - id
+        - type
+        - position
+        - confidence
+        - timestamp
+        - status
+        - detected_by
+      properties:
+        id:
+          type: string
+          description: Unique detection ID
+        type:
+          type: string
+          description: Detection classification type
+        position:
+          $ref: "#/components/schemas/Position"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Detection confidence score (0.0-1.0)
+        timestamp:
+          type: string
+          format: date-time
+          description: When the detection was made (RFC 3339)
+        status:
+          type: string
+          description: Detection lifecycle status
+        detected_by:
+          type: string
+          description: Vehicle ID of the detecting scout
+        assigned_to:
+          type: string
+          nullable: true
+          description: Vehicle ID of the assigned executor, or null
+
+    # -- Metrics --
+    TelemetryLogEntry:
+      type: object
+      required:
+        - vehicle_id
+        - timestamp
+        - latitude
+        - longitude
+        - altitude
+        - battery_pct
+        - status
+      properties:
+        vehicle_id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        latitude:
+          type: number
+          format: double
+        longitude:
+          type: number
+          format: double
+        altitude:
+          type: number
+          format: double
+        battery_pct:
+          type: integer
+          format: uint8
+          minimum: 0
+          maximum: 255
+        status:
+          type: string
+        partner_id:
+          type: string
+          nullable: true
+          description: Partner that submitted this telemetry, or null for internal
+
+    DetectionSummary:
+      type: object
+      required:
+        - detection_type
+        - count
+      properties:
+        detection_type:
+          type: string
+          description: Detection classification type
+        count:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: Number of detections of this type
+
+    # -- Webhooks --
+    WebhookRegistration:
+      type: object
+      required:
+        - url
+        - events
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTPS callback URL
+          pattern: "^https://"
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - detection
+              - task_assigned
+              - task_completed
+              - mission_start
+              - mission_abort
+              - vehicle_online
+              - vehicle_offline
+          minItems: 1
+          description: Events to subscribe to
+        secret:
+          type: string
+          nullable: true
+          description: >
+            Optional shared secret. When set, outgoing payloads are signed
+            with HMAC-SHA256 and the signature is sent in the
+            X-Olympus-Signature header.
+
+    WebhookRegisterResponse:
+      type: object
+      required:
+        - id
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique webhook registration ID
+        status:
+          type: string
+          description: Registration status
+          const: registered
+
+    WebhookEntry:
+      type: object
+      required:
+        - id
+        - partner_id
+        - url
+        - events
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique webhook ID
+        partner_id:
+          type: string
+          description: Partner who registered this webhook
+        url:
+          type: string
+          format: uri
+          description: HTTPS callback URL
+        events:
+          type: array
+          items:
+            type: string
+          description: Subscribed event types
+        secret_hash:
+          type: string
+          nullable: true
+          description: SHA-256 hash of the secret (never the raw secret)
+        created_at:
+          type: string
+          format: date-time
+          description: When the webhook was registered (RFC 3339)
+
+    # -- Advisor --
+    ChatRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: User message for the AI advisor
+
+    ChatResponse:
+      type: object
+      required:
+        - response
+      properties:
+        response:
+          type: string
+          description: AI advisor reply text
+        sources:
+          type: array
+          items:
+            type: string
+          default: []
+          description: Source references used to formulate the response
+
+    # -- WebSocket --
+    TelemetryEvent:
+      type: object
+      description: >
+        Real-time telemetry event streamed over the WebSocket connection.
+      required:
+        - event
+        - vehicle_id
+        - data
+        - timestamp
+      properties:
+        event:
+          type: string
+          description: Event type identifier
+        vehicle_id:
+          type: string
+          description: Source vehicle ID
+        data:
+          description: Arbitrary telemetry payload
+        timestamp:
+          type: string
+          format: date-time
+          description: Event timestamp (RFC 3339)

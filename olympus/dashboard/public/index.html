@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0d1117" />
+    <meta name="description" content="OLYMPUS OS - Autonomous fleet command and control platform by ELARIS." />
+
+    <title>OLYMPUS OS // OVERWATCH</title>
+
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50,15 85,75 15,75' fill='none' stroke='%23388bfd' stroke-width='5' stroke-linejoin='round'/><circle cx='50' cy='15' r='6' fill='%23388bfd'/><ellipse cx='50' cy='65' rx='30' ry='10' fill='none' stroke='%238b949e' stroke-width='1.5' opacity='0.4'/></svg>" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background-color: #0d1117;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run OLYMPUS OS.</noscript>
+    <div id="root"></div>
+
+    <script>
+      const originalError = console.error;
+      console.error = function(...args) {
+        const errorString = args.join(' ');
+        if (errorString.includes('recentlyCreatedOwnerStacks') ||
+            errorString.includes('resium.js')) {
+          return;
+        }
+        originalError.apply(console, args);
+      };
+    </script>
+  </body>
+</html>

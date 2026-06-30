@@ -1,0 +1,46 @@
+# Corrected vehicle-api build (see docker-compose.swarmfix.yml).
+# The original Dockerfile COPYs `../rust-bridge`, but that crate is now `bridge`
+# (vehicle-api/Cargo.toml: olympus-bridge = { path = "../bridge" }) and a build
+# context of ./vehicle-api can't reach it. Here the context is the repo ROOT, so
+# both `bridge/` and `vehicle-api/` are visible; `bridge` lands at /usr/src/bridge
+# so the Cargo path dep "../bridge" (relative to /usr/src/app) resolves cleanly.
+
+# ---- Builder Stage ----
+# Latest 1.x: with no Cargo.lock, cargo pulls the newest deps (rmp-serde 1.3.x,
+# mavlink 0.14, ...) whose manifests need a recent edition/cargo to parse.
+FROM rust:1-slim AS builder
+
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev cmake build-essential libudev-dev \
+    git clang libclang-dev libproj-dev sqlite3 libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/app
+
+# olympus-bridge path dependency: ../bridge from /usr/src/app == /usr/src/bridge
+COPY bridge /usr/src/bridge
+COPY vehicle-api/Cargo.toml vehicle-api/Cargo.lock* ./
+COPY vehicle-api/src/ src/
+
+RUN cargo build --release
+
+# ---- Runtime Stage ----
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash appuser
+
+COPY --from=builder /usr/src/app/target/release/vehicle-api /usr/local/bin/vehicle-api
+
+USER appuser
+
+ENV VEHICLE_API_PORT=3001
+ENV ZENOH_ENDPOINTS=tcp/zenoh-router:7447
+ENV RUST_LOG=vehicle_api=info,tower_http=info
+
+EXPOSE 3001
+
+CMD ["vehicle-api"]

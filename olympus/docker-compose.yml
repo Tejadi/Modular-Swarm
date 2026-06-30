@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  zenoh-router:
+    image: eclipse/zenoh:latest
+    container_name: olympus-zenoh
+    ports:
+      - "7447:7447"
+      - "8000:8000"
+      - "9000:9000"
+    volumes:
+      - ./zenoh.json5:/etc/zenoh.json5
+    command: ["--config", "/etc/zenoh.json5"]
+    networks:
+      - olympus-net
+    restart: unless-stopped
+
+  rust-bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    container_name: olympus-bridge
+    environment:
+      - ZENOH_ENDPOINTS=tcp/zenoh-router:7447
+    depends_on:
+      - zenoh-router
+    networks:
+      - olympus-net
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_ZENOH_URL=http://localhost:8000
+        - REACT_APP_VEHICLE_API_URL=http://localhost:3001
+        - REACT_APP_INSTANCE=${OLYMPUS_INSTANCE:-ceres}
+    container_name: olympus-dashboard
+    ports:
+      - "3000:3000"
+    depends_on:
+      - zenoh-router
+    networks:
+      - olympus-net
+    restart: unless-stopped
+
+  vehicle-api:
+    build:
+      context: ./vehicle-api
+      dockerfile: Dockerfile
+    container_name: olympus-vehicle-api
+    ports:
+      - "3001:3001"
+    environment:
+      - VEHICLE_API_PORT=3001
+      - ZENOH_ENDPOINTS=tcp/zenoh-router:7447
+      - RUST_LOG=info,olympus_vehicle_api=debug
+      - OLYMPUS_API_KEY=${OLYMPUS_API_KEY:-}
+      - ADVISOR_URL=http://advisor:8080
+      - OLYMPUS_INSTANCE=${OLYMPUS_INSTANCE:-ceres}
+    depends_on:
+      - zenoh-router
+    networks:
+      - olympus-net
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: olympus-ollama
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - olympus-net
+    restart: unless-stopped
+
+  advisor:
+    build:
+      context: ./brain
+      dockerfile: Dockerfile
+    container_name: olympus-advisor
+    command: ["python", "-m", "olympus_brain.api"]
+    environment:
+      - ADVISOR_PORT=8080
+      - OLYMPUS_INSTANCE=${OLYMPUS_INSTANCE:-athena}
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - VEHICLE_API_URL_INTERNAL=http://vehicle-api:3001
+    depends_on:
+      - ollama
+      - vehicle-api
+    networks:
+      - olympus-net
+    restart: unless-stopped
+
+  brain-simulator:
+    build:
+      context: ./brain
+      dockerfile: Dockerfile
+    container_name: olympus-brain-sim
+    environment:
+      - ZENOH_ENDPOINTS=tcp/zenoh-router:7447
+      - OLYMPUS_SIMULATE=1
+      - OLYMPUS_INSTANCE=${OLYMPUS_INSTANCE:-ceres}
+    depends_on:
+      - zenoh-router
+    networks:
+      - olympus-net
+    restart: unless-stopped
+    profiles:
+      - simulation
+
+volumes:
+  ollama-data:
+
+networks:
+  olympus-net:
+    driver: bridge

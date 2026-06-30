@@ -1,0 +1,72 @@
+[project]
+name = "olympus-brain"
+version = "0.1.0"
+description = "OLYMPUS OS Cognitive Core - Swarm Logic and Coordination"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "OLYMPUS OS Team"}
+]
+dependencies = [
+    "eclipse-zenoh>=0.11.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "shapely>=2.0.0",
+    "pydantic>=2.0.0",
+    "asyncio>=3.4.3",
+    "aiohttp>=3.9.0",
+    "httpx>=0.25.0",
+    "python-json-logger>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+ros = [
+    "rclpy",
+]
+ai = [
+    "httpx>=0.25.0",
+]
+fields2cover = [
+    "fields2cover>=1.0.0",
+]
+camera = [
+    "ultralytics>=8.1.0",
+    "opencv-python>=4.8.0",
+    "lap>=0.4.0",
+]
+
+[project.scripts]
+olympus-brain = "olympus_brain.main:main"
+olympus-scout = "olympus_brain.scout:main"
+olympus-executor = "olympus_brain.executor:main"
+olympus-register = "olympus_brain.cli_register:main"
+olympus-advisor = "olympus_brain.api:main"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["olympus_brain*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true

@@ -223,9 +223,9 @@ Exercises the whole command-station pipeline on one machine.
    `rest` sink:
 
    ```bash
-   # in the olympus repo (separate checkout):
-   docker compose up -d zenoh-router vehicle-api dashboard
-   # back in nRF-swarm:
+   # Olympus is vendored under nRF-swarm/olympus:
+   (cd olympus && docker compose up -d zenoh-router vehicle-api dashboard)
+   # then, back at the nRF-swarm root:
    python3 -m olympus_link --port /dev/pts/N --prefix ceres --sink rest
    # open http://localhost:3000 — modules appear on the map as they come online,
    # move, drop out (failover), and reconfigure.
@@ -270,8 +270,8 @@ into (any Linux host with Docker + Docker Compose v2.20+ and Python 3.9+). It ru
 the Olympus stack, bridges the mesh, and serves the dashboard:
 
 ```bash
-# from your olympus checkout — zenoh router + vehicle-api + the dashboard:
-docker compose up -d zenoh-router vehicle-api dashboard
+# Olympus is vendored under nRF-swarm/olympus — zenoh router + vehicle-api + dashboard:
+(cd olympus && docker compose up -d zenoh-router vehicle-api dashboard)
 
 # from nRF-swarm — bridge the leader's mesh traffic into the dashboard:
 ls /dev/ttyACM*            # find the leader's data port (usually /dev/ttyACM0)
@@ -663,6 +663,12 @@ nRF-swarm/
 │   └── README-camera.md, README-autostart.md, requirements-jetson.txt
 ├── sim/                         # PTY swarm simulator + automated end-to-end test
 ├── OLYMPUS_INTEGRATION.md       # full design + verification status
+├── olympus/                     # vendored Olympus command center
+│   ├── dashboard/               #   React + Cesium operator GUI (Athena OS)
+│   ├── vehicle-api/             #   Rust vehicle/command REST API
+│   ├── bridge/                  #   mavlink <-> zenoh bridge
+│   ├── brain/                   #   decentralized mission autonomy (Python)
+│   └── docker-compose.yml, zenoh.json5
 │
 │  ── underlying CoAP light demo ──
 ├── coap_server/                 # CoAP "light" server (FTD) — flash to 2 boards

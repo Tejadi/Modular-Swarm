@@ -1,0 +1,15 @@
+# Overlay that fixes the vehicle-api build for the nRF-swarm bring-up without
+# touching the committed docker-compose.yml / Dockerfile. Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.swarmfix.yml up -d \
+#     zenoh-router vehicle-api dashboard
+# It moves the vehicle-api build context to the repo root (so the `bridge` crate
+# is reachable) and points at vehicle-api/Dockerfile.swarmfix.
+services:
+  # vehicle-api pins the zenoh 0.11.0 client, so the router must match 0.11.0;
+  # eclipse/zenoh:latest is 1.x and the native protocol is incompatible.
+  zenoh-router:
+    image: eclipse/zenoh:0.11.0
+  vehicle-api:
+    build:
+      context: .
+      dockerfile: vehicle-api/Dockerfile.swarmfix

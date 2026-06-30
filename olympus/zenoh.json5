@@ -1,0 +1,56 @@
+{
+  "listen": {
+    "endpoints": [
+      "tcp/0.0.0.0:7447",
+      "ws/0.0.0.0:9000"
+    ]
+  },
+  "plugins": {
+    "rest": {
+      "http_port": "0.0.0.0:8000"
+    },
+    "storage_manager": {
+      "storages": {
+        "olympus": {
+          "key_expr": "olympus/**",
+          "volume": {
+            "id": "memory"
+          }
+        },
+        // The dashboard (useZenohPolling) GETs `ceres/**`; retain it so REST PUTs
+        // from swarm-link (ceres/swarm/{eui}/telemetry) are returned to the poll.
+        "ceres": {
+          "key_expr": "ceres/**",
+          "volume": {
+            "id": "memory"
+          }
+        }
+      }
+    },
+    // ROS2 DDS bridge — disabled by default.
+    // Enable with: ZENOH_ROS2DDS_ENABLED=true
+    // Requires: zenoh-plugin-ros2dds installed
+    "ros2dds": {
+      "__required__": false,
+      "domain": 0,
+      "allow": {
+        "publishers": [
+          "sensor_msgs/msg/BatteryState",
+          "geometry_msgs/msg/PoseStamped",
+          "nav_msgs/msg/Odometry",
+          "std_msgs/msg/String"
+        ],
+        "subscribers": [
+          "geometry_msgs/msg/Twist",
+          "std_msgs/msg/String"
+        ]
+      },
+      "deny": [],
+      "pub_max_frequencies": [
+        "sensor_msgs/msg/BatteryState=1",
+        "geometry_msgs/msg/PoseStamped=5",
+        "nav_msgs/msg/Odometry=10"
+      ]
+    }
+  }
+}
